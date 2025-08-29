@@ -107,19 +107,23 @@ class Teacher {
         }
     }
 
-    // Fetch projects for a given school year id
-    public function fetchProjectMasterBySchool_year_id($schoolYearId) {
+    // Fetch projects for a given school year id and teacher id
+    public function fetchProjectMasterBySchool_year_id($schoolYearId, $teacherId) {
         try {
             $schoolYearId = (int)$schoolYearId;
-            if ($schoolYearId <= 0) {
-                return json_encode(['status' => 'error', 'message' => 'school_year_id must be provided and greater than 0']);
+            $teacherId = (int)$teacherId;
+            if ($schoolYearId <= 0 || $teacherId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'Both school_year_id and teacher_id must be provided and greater than 0']);
             }
 
             $sql = "SELECT `project_master_id`, `project_title`, `project_description`, `project_code`, `project_teacher_id`, `project_is_active`, `project_school_year_id`
                     FROM `tbl_project_master`
-                    WHERE `project_school_year_id` = :sid";
+                    WHERE `project_school_year_id` = :sid AND `project_teacher_id` = :tid";
             $stmt = $this->conn->prepare($sql);
-            $stmt->execute([':sid' => $schoolYearId]);
+            $stmt->execute([
+                ':sid' => $schoolYearId,
+                ':tid' => $teacherId
+            ]);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             return json_encode(['status' => 'success', 'data' => $rows]);
@@ -265,7 +269,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             break;
         case 'fetchProjectMasterBySchool_year_id':
             $sid = $payload['school_year_id'] ?? $payload['project_school_year_id'] ?? $payload['schoolYearId'] ?? 0;
-            echo $teacher->fetchProjectMasterBySchool_year_id($sid);
+            $tid = $payload['project_teacher_id'] ?? $payload['teacher_id'] ?? 0;
+            echo $teacher->fetchProjectMasterBySchool_year_id($sid, $tid);
             break;
         case 'savePhase':
             echo $teacher->savePhase($payload);

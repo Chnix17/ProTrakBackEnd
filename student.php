@@ -40,6 +40,560 @@ class Teacher {
         }
     }
     
+    public function insertPhaseFile($data, $file) {
+    $targetPath = null;
+    
+    try {
+        // Debug: Log the received data
+        error_log('Starting file upload process');
+        error_log('Data: ' . print_r($data, true));
+        error_log('File info: ' . print_r($file, true));
+        
+        // Validate required fields
+        if (empty($data['phase_project_id']) || empty($data['user_id'])) {
+            throw new Exception('Phase project ID and user ID are required');
+        }
+
+        // Validate file was uploaded without errors
+        if ($file['error'] !== UPLOAD_ERR_OK) {
+            $errorMessages = [
+                UPLOAD_ERR_INI_SIZE => 'The uploaded file exceeds the upload_max_filesize directive in php.ini',
+                UPLOAD_ERR_FORM_SIZE => 'The uploaded file exceeds the MAX_FILE_SIZE directive in the HTML form',
+                UPLOAD_ERR_PARTIAL => 'The uploaded file was only partially uploaded',
+                UPLOAD_ERR_NO_FILE => 'No file was uploaded',
+                UPLOAD_ERR_NO_TMP_DIR => 'Missing a temporary folder',
+                UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk',
+                UPLOAD_ERR_EXTENSION => 'A PHP extension stopped the file upload',
+            ];
+            $errorMessage = $errorMessages[$file['error']] ?? 'Unknown upload error';
+            throw new Exception('File upload failed: ' . $errorMessage);
+        }
+
+        // Verify file was actually uploaded via HTTP POST
+        if (!is_uploaded_file($file['tmp_name'])) {
+            throw new Exception('Possible file upload attack: ' . $file['name']);
+        }
+
+        // Create uploads directory if it doesn't exist
+        $uploadDir = __DIR__ . '/uploads_files/';
+        if (!is_dir($uploadDir)) {
+            error_log('Creating upload directory: ' . $uploadDir);
+            if (!mkdir($uploadDir, 0777, true)) {
+                $error = error_get_last();
+                throw new Exception('Failed to create uploads directory: ' . ($error['message'] ?? 'Unknown error'));
+            }
+            // Set permissions after creation
+            chmod($uploadDir, 0777);
+        } else {
+            // Ensure directory is writable
+            if (!is_writable($uploadDir)) {
+                throw new Exception('Upload directory is not writable');
+            }
+        }
+
+        // Generate a unique filename
+        $fileExtension = pathinfo($file['name'], PATHINFO_EXTENSION);
+        $uniqueId = uniqid();
+        $newFilename = $uniqueId . '_' . preg_replace('/[^a-zA-Z0-9\._\-]/', '', $file['name']);
+        $targetPath = $uploadDir . $newFilename;
+        
+        error_log('Attempting to move uploaded file to: ' . $targetPath);
+        error_log('Temporary file location: ' . $file['tmp_name']);
+        error_log('Temporary file exists: ' . (file_exists($file['tmp_name']) ? 'yes' : 'no'));
+        error_log('Target directory writable: ' . (is_writable($uploadDir) ? 'yes' : 'no'));
+
+        // Move the uploaded file
+        if (!move_uploaded_file($file['tmp_name'], $targetPath)) {
+            $error = error_get_last();
+            throw new Exception('Failed to move uploaded file: ' . ($error['message'] ?? 'Unknown error'));
+        }
+        
+        // Verify the file was moved successfully
+        if (!file_exists($targetPath)) {
+            throw new Exception('File was not moved to the target location');
+        }
+        
+        // Set proper permissions on the uploaded file
+        chmod($targetPath, 0644);
+
+        // Save file info to database
+        $sql = "INSERT INTO tbl_phase_project_files 
+                (phase_project_id, phase_project_file, phase_file_created_by, phase_file_created_at) 
+                VALUES (:phase_project_id, :file_name, :user_id, NOW())";
+        
+        $stmt = $this->conn->prepare($sql);
+        $result = $stmt->execute([
+            ':phase_project_id' => $data['phase_project_id'],
+            ':file_name' => $newFilename,
+            ':user_id' => $data['user_id']
+        ]);
+        
+        if (!$result) {
+            $errorInfo = $stmt->errorInfo();
+            throw new Exception('Database error: ' . ($errorInfo[2] ?? 'Unknown error'));
+        }
+
+        // Get the inserted file record
+        $fileId = $this->conn->lastInsertId();
+        $fetchSql = "SELECT f.*, u.users_fname, u.users_mname, u.users_lname
+                        FROM tbl_phase_project_files f
+                        LEFT JOIN tbl_users u ON f.phase_file_created_by = u.users_id
+                        WHERE f.phase_project_files_id = :file_id";
+                        
+        $fetchStmt = $this->conn->prepare($fetchSql);
+        $fetchStmt->bindParam(':file_id', $fileId, PDO::PARAM_INT);
+        
+        if (!$fetchStmt->execute()) {
+            $errorInfo = $fetchStmt->errorInfo();
+            throw new Exception('Failed to fetch uploaded file info: ' . ($errorInfo[2] ?? 'Unknown error'));
+        }
+        
+        $fileRecord = $fetchStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$fileRecord) {
+            throw new Exception('Failed to retrieve uploaded file information');
+        }
+        
+        return [
+            'status' => 'success',
+            'message' => 'File uploaded successfully',
+            'data' => $fileRecord
+        ];
+        
+    } catch (Exception $e) {
+        // Log the detailed error
+        error_log('File upload error: ' . $e->getMessage());
+        
+        // Clean up file if it was uploaded but something else failed
+        if (isset($targetPath) && file_exists($targetPath)) {
+            @unlink($targetPath);
+        }
+        
+        // Return detailed error information
+        return [
+            'status' => 'error',
+            'message' => $e->getMessage(),
+            'debug' => [
+                'upload_dir' => $uploadDir ?? 'not set',
+                'upload_dir_writable' => isset($uploadDir) ? (is_writable($uploadDir) ? 'yes' : 'no') : 'not checked',
+                'target_path' => $targetPath ?? 'not set',
+                'temp_file' => $file['tmp_name'] ?? 'not set',
+                'file_size' => $file['size'] ?? 'unknown',
+                'file_type' => $file['type'] ?? 'unknown',
+                'error_code' => $file['error'] ?? 'unknown',
+                'memory_limit' => ini_get('memory_limit'),
+                'post_max_size' => ini_get('post_max_size'),
+                'upload_max_filesize' => ini_get('upload_max_filesize'),
+                'disk_free_space' => disk_free_space(__DIR__) . ' bytes',
+                'php_user' => get_current_user()
+            ]
+        ];
+    }
+}
+    
+    public function uploadPhaseFileFromJson($data) {
+        $targetPath = null;
+        
+        try {
+            // Debug: Log the received data
+            error_log('Starting JSON file upload process');
+            error_log('Data keys: ' . implode(', ', array_keys($data)));
+            
+            // Validate required fields
+            if (empty($data['phase_project_id']) || empty($data['user_id']) || empty($data['file']) || empty($data['file_name'])) {
+                throw new Exception('Phase project ID, user ID, file content, and file name are required');
+            }
+            
+            // Decode base64 file content
+            $fileContent = base64_decode($data['file']);
+            if ($fileContent === false) {
+                throw new Exception('Invalid base64 file content');
+            }
+            
+            // Create uploads directory if it doesn't exist
+            $uploadDir = __DIR__ . '/uploads_files/';
+            if (!is_dir($uploadDir)) {
+                error_log('Creating upload directory: ' . $uploadDir);
+                if (!mkdir($uploadDir, 0777, true)) {
+                    $error = error_get_last();
+                    throw new Exception('Failed to create uploads directory: ' . ($error['message'] ?? 'Unknown error'));
+                }
+                chmod($uploadDir, 0777);
+            } else {
+                if (!is_writable($uploadDir)) {
+                    throw new Exception('Upload directory is not writable');
+                }
+            }
+            
+            // Generate a unique filename
+            $fileExtension = pathinfo($data['file_name'], PATHINFO_EXTENSION);
+            $uniqueId = uniqid();
+            $newFilename = $uniqueId . '_' . preg_replace('/[^a-zA-Z0-9\._\-]/', '', $data['file_name']);
+            $targetPath = $uploadDir . $newFilename;
+            
+            error_log('Attempting to save file to: ' . $targetPath);
+            error_log('File size: ' . strlen($fileContent) . ' bytes');
+            
+            // Save the file content
+            if (file_put_contents($targetPath, $fileContent) === false) {
+                $error = error_get_last();
+                throw new Exception('Failed to save file: ' . ($error['message'] ?? 'Unknown error'));
+            }
+            
+            // Verify the file was saved successfully
+            if (!file_exists($targetPath)) {
+                throw new Exception('File was not saved to the target location');
+            }
+            
+            // Set proper permissions on the uploaded file
+            chmod($targetPath, 0644);
+            
+            // Save file info to database
+            $sql = "INSERT INTO tbl_phase_project_files 
+                    (phase_project_id, phase_project_file, phase_file_created_by, phase_file_created_at) 
+                    VALUES (:phase_project_id, :file_name, :user_id, NOW())";
+            
+            $stmt = $this->conn->prepare($sql);
+            $result = $stmt->execute([
+                ':phase_project_id' => $data['phase_project_id'],
+                ':file_name' => $newFilename,
+                ':user_id' => $data['user_id']
+            ]);
+            
+            if (!$result) {
+                $errorInfo = $stmt->errorInfo();
+                throw new Exception('Database error: ' . ($errorInfo[2] ?? 'Unknown error'));
+            }
+            
+            // Get the inserted file record
+            $fileId = $this->conn->lastInsertId();
+            $fetchSql = "SELECT f.*, u.users_fname, u.users_mname, u.users_lname
+                            FROM tbl_phase_project_files f
+                            LEFT JOIN tbl_users u ON f.phase_file_created_by = u.users_id
+                            WHERE f.phase_project_files_id = :file_id";
+                            
+            $fetchStmt = $this->conn->prepare($fetchSql);
+            $fetchStmt->bindParam(':file_id', $fileId, PDO::PARAM_INT);
+            
+            if (!$fetchStmt->execute()) {
+                $errorInfo = $fetchStmt->errorInfo();
+                throw new Exception('Failed to fetch uploaded file info: ' . ($errorInfo[2] ?? 'Unknown error'));
+            }
+            
+            $fileRecord = $fetchStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$fileRecord) {
+                throw new Exception('Failed to retrieve uploaded file information');
+            }
+            
+            return [
+                'status' => 'success',
+                'message' => 'File uploaded successfully',
+                'data' => $fileRecord
+            ];
+            
+        } catch (Exception $e) {
+            // Log the detailed error
+            error_log('JSON file upload error: ' . $e->getMessage());
+            
+            // Clean up file if it was saved but something else failed
+            if (isset($targetPath) && file_exists($targetPath)) {
+                @unlink($targetPath);
+            }
+            
+            // Return detailed error information
+            return [
+                'status' => 'error',
+                'message' => $e->getMessage(),
+                'debug' => [
+                    'upload_dir' => $uploadDir ?? 'not set',
+                    'upload_dir_writable' => isset($uploadDir) ? (is_writable($uploadDir) ? 'yes' : 'no') : 'not checked',
+                    'target_path' => $targetPath ?? 'not set',
+                    'file_size' => isset($fileContent) ? strlen($fileContent) . ' bytes' : 'unknown',
+                    'memory_limit' => ini_get('memory_limit'),
+                    'post_max_size' => ini_get('post_max_size'),
+                    'upload_max_filesize' => ini_get('upload_max_filesize'),
+                    'disk_free_space' => disk_free_space(__DIR__) . ' bytes'
+                ]
+            ];
+        }
+    }
+    
+    public function fetchPhasesProjectDetailById($phaseProjectId) {
+        try {
+            // Fetch phase project basic info
+            $phaseSql = "SELECT pp.*, pm.phase_main_name, pm.phase_main_description,
+                               pm.phase_start_date, pm.phase_end_date,
+                               u.users_fname, u.users_mname, u.users_lname
+                        FROM tbl_phase_project pp
+                        JOIN tbl_phase_main pm ON pp.phase_project_phase_id = pm.phase_main_id
+                        LEFT JOIN tbl_users u ON pp.phase_created_by = u.users_id
+                        WHERE pp.phase_project_id = :phase_project_id";
+            
+            $stmt = $this->conn->prepare($phaseSql);
+            $stmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $stmt->execute();
+            $phase = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$phase) {
+                return ['status' => 'error', 'message' => 'Phase project not found'];
+            }
+            
+            // Fetch latest status
+            $statusSql = "SELECT s.*, 
+                         CASE 
+                             WHEN s.phase_project_status_status_id = 1 THEN 'In Progress'
+                             WHEN s.phase_project_status_status_id = 2 THEN 'Completed'
+                             WHEN s.phase_project_status_status_id = 3 THEN 'On Hold'
+                             ELSE 'Pending'
+                         END as status_name
+                         FROM tbl_phase_project_status s
+                         WHERE s.phase_project_id = :phase_project_id
+                         ORDER BY s.phase_project_status_created_at DESC
+                         LIMIT 1";
+            
+            $statusStmt = $this->conn->prepare($statusSql);
+            $statusStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $statusStmt->execute();
+            $status = $statusStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // Fetch discussions with user info
+            $discussionSql = "SELECT d.*, u.users_fname, u.users_mname, u.users_lname
+                             FROM tbl_phase_discussion d
+                             LEFT JOIN tbl_users u ON d.phase_discussion_user_id = u.users_id
+                             WHERE d.phase_discussion_phase_project_id = :phase_project_id
+                             ORDER BY d.phase_discussion_created_at DESC";
+            
+            $discussionStmt = $this->conn->prepare($discussionSql);
+            $discussionStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $discussionStmt->execute();
+            $discussions = $discussionStmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // Fetch files with uploader info
+            $filesSql = "SELECT f.*, u.users_fname, u.users_mname, u.users_lname
+                        FROM tbl_phase_project_files f
+                        LEFT JOIN tbl_users u ON f.phase_file_created_by = u.users_id
+                        WHERE f.phase_project_id = :phase_project_id
+                        ORDER BY f.phase_file_created_at DESC";
+            
+            $filesStmt = $this->conn->prepare($filesSql);
+            $filesStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $filesStmt->execute();
+            $files = $filesStmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // Fetch status history
+            $statusHistorySql = "SELECT s.*, 
+                               CASE 
+                                   WHEN s.phase_project_status_status_id = 1 THEN 'In Progress'
+                                   WHEN s.phase_project_status_status_id = 2 THEN 'Completed'
+                                   WHEN s.phase_project_status_status_id = 3 THEN 'On Hold'
+                                   ELSE 'Pending'
+                               END as status_name,
+                               u.users_fname, u.users_mname, u.users_lname
+                               FROM tbl_phase_project_status s
+                               LEFT JOIN tbl_users u ON s.phase_project_status_created_by = u.users_id
+                               WHERE s.phase_project_id = :phase_project_id
+                               ORDER BY s.phase_project_status_created_at DESC";
+            
+            $statusHistoryStmt = $this->conn->prepare($statusHistorySql);
+            $statusHistoryStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $statusHistoryStmt->execute();
+            $statusHistory = $statusHistoryStmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // Format the response
+            $response = [
+                'status' => 'success',
+                'data' => [
+                    'phase' => $phase,
+                    'current_status' => $status,
+                    'status_history' => $statusHistory,
+                    'discussions' => $discussions,
+                    'files' => $files
+                ]
+            ];
+            
+            return $response;
+            
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+    
+    public function insertDiscussion($data) {
+        try {
+            // Validate required fields
+            $requiredFields = ['discussion_text', 'user_id', 'phase_project_id'];
+            foreach ($requiredFields as $field) {
+                if (empty($data[$field])) {
+                    throw new Exception(ucfirst(str_replace('_', ' ', $field)) . ' is required');
+                }
+            }
+            
+            // Insert discussion
+            $sql = "INSERT INTO tbl_phase_discussion 
+                   (phase_discussion_text, phase_discussion_user_id, phase_discussion_created_at, phase_discussion_phase_project_id) 
+                   VALUES (:discussion_text, :user_id, NOW(), :phase_project_id)";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':discussion_text', $data['discussion_text'], PDO::PARAM_STR);
+            $stmt->bindParam(':user_id', $data['user_id'], PDO::PARAM_INT);
+            $stmt->bindParam(':phase_project_id', $data['phase_project_id'], PDO::PARAM_INT);
+            $stmt->execute();
+            
+            $discussionId = $this->conn->lastInsertId();
+            
+            // Fetch the created discussion with user details
+            $fetchSql = "SELECT d.*, u.users_fname as user_firstname, u.users_lname as user_lastname 
+                        FROM tbl_phase_discussion d
+                        LEFT JOIN tbl_users u ON d.phase_discussion_user_id = u.users_id
+                        WHERE d.phase_discussion_id = :discussion_id";
+                        
+            $fetchStmt = $this->conn->prepare($fetchSql);
+            $fetchStmt->bindParam(':discussion_id', $discussionId, PDO::PARAM_INT);
+            $fetchStmt->execute();
+            $discussion = $fetchStmt->fetch(PDO::FETCH_ASSOC);
+            
+            return [
+                'status' => 'success',
+                'message' => 'Discussion added successfully',
+                'data' => $discussion
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'status' => 'error',
+                'message' => $e->getMessage()
+            ];
+        }
+    }
+    
+    public function insertPhase($data) {
+        try {
+            // Begin transaction
+            $this->conn->beginTransaction();
+            
+            // First, check if the phase is already started
+            $checkSql = "SELECT phase_project_id FROM tbl_phase_project 
+                        WHERE phase_project_phase_id = :phase_id 
+                        AND phase_project_main_id = :project_main_id";
+            
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->bindParam(':phase_id', $data['phase_id'], PDO::PARAM_INT);
+            $checkStmt->bindParam(':project_main_id', $data['project_main_id'], PDO::PARAM_INT);
+            $checkStmt->execute();
+            
+            if ($checkStmt->rowCount() > 0) {
+                throw new Exception('This phase has already been started');
+            }
+            
+            // Insert into tbl_phase_project
+            $phaseProjectSql = "INSERT INTO tbl_phase_project 
+                              (phase_project_phase_id, phase_project_main_id, phase_project_created_at, phase_created_by) 
+                              VALUES (:phase_id, :project_main_id, NOW(), :created_by)";
+            
+            $phaseProjectStmt = $this->conn->prepare($phaseProjectSql);
+            $phaseProjectStmt->bindParam(':phase_id', $data['phase_id'], PDO::PARAM_INT);
+            $phaseProjectStmt->bindParam(':project_main_id', $data['project_main_id'], PDO::PARAM_INT);
+            $phaseProjectStmt->bindParam(':created_by', $data['created_by'], PDO::PARAM_INT);
+            $phaseProjectStmt->execute();
+            
+            $phaseProjectId = $this->conn->lastInsertId();
+            
+            // Insert into tbl_phase_project_status (status_id = 1 for 'In Progress')
+            $statusSql = "INSERT INTO tbl_phase_project_status 
+                         (phase_project_id, phase_project_status_status_id, phase_project_status_created_at, phase_project_status_created_by) 
+                         VALUES (:phase_project_id, 1, NOW(), :created_by)";
+            
+            $statusStmt = $this->conn->prepare($statusSql);
+            $statusStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $statusStmt->bindParam(':created_by', $data['created_by'], PDO::PARAM_INT);
+            $statusStmt->execute();
+            
+            // Commit transaction
+            $this->conn->commit();
+            
+            return [
+                'status' => 'success',
+                'message' => 'Phase started successfully',
+                'phase_project_id' => $phaseProjectId
+            ];
+            
+        } catch (Exception $e) {
+            // Rollback transaction on error
+            if ($this->conn->inTransaction()) {
+                $this->conn->rollBack();
+            }
+            
+            return [
+                'status' => 'error',
+                'message' => $e->getMessage()
+            ];
+        }
+    }
+    
+    public function fetchProjectMainById($projectMainId) {
+        try {
+            // Fetch project main details
+            $projectSql = "SELECT `project_main_id`, `project_title`, `project_main_master_id`, `project_description`, 
+                                  `project_created_by_user_id`, `project_is_active` 
+                           FROM `tbl_project_main` 
+                           WHERE `project_main_id` = :project_main_id";
+            
+            $stmt = $this->conn->prepare($projectSql);
+            $stmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
+            $stmt->execute();
+            $project = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$project) {
+                return ['status' => 'error', 'message' => 'Project not found'];
+            }
+            
+            // Fetch all phases for this project
+            $phasesSql = "SELECT pm.`phase_main_id`, pm.`phase_main_name`, pm.`phase_main_description`,
+                                 pm.`phase_start_date`, pm.`phase_end_date`,
+                                 IF(pp.`phase_project_id` IS NOT NULL, 1, 0) as is_started
+                          FROM `tbl_phase_main` pm
+                          LEFT JOIN `tbl_phase_project` pp ON pm.`phase_main_id` = pp.`phase_project_phase_id` 
+                              AND pp.`phase_project_main_id` = :project_main_id
+                          WHERE pm.`phase_project_master_id` = :project_master_id";
+            
+            $stmt = $this->conn->prepare($phasesSql);
+            $stmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
+            $stmt->bindParam(':project_master_id', $project['project_main_master_id'], PDO::PARAM_INT);
+            $stmt->execute();
+            $phases = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // Add phase status
+            $currentDate = date('Y-m-d');
+            foreach ($phases as &$phase) {
+                $phase['status'] = 'Not Started';
+                if ($phase['is_started']) {
+                    $phase['status'] = 'In Progress';
+                    if ($phase['phase_end_date'] < $currentDate) {
+                        $phase['status'] = 'Completed';
+                    }
+                }
+                unset($phase['is_started']);
+            }
+            
+            $project['phases'] = $phases;
+            
+            return [
+                'status' => 'success',
+                'data' => $project
+            ];
+            
+        } catch(PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+    
     public function saveJoinedWorkspace($data) {
         try {
             // First check if the student has already joined this project
@@ -499,6 +1053,59 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
             $result = $teacher->fetchMyProjects($payload['user_id']);
+            echo json_encode($result);
+            break;
+            
+        case 'fetchProjectMainById':
+            if (empty($payload['project_main_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Project Main ID is required']);
+                exit;
+            }
+            $result = $teacher->fetchProjectMainById($payload['project_main_id']);
+            echo json_encode($result);
+            break;
+            
+        case 'insertPhase':
+            $requiredFields = ['phase_id', 'project_main_id', 'created_by'];
+            foreach ($requiredFields as $field) {
+                if (empty($payload[$field])) {
+                    echo json_encode(['status' => 'error', 'message' => ucfirst($field) . ' is required']);
+                    exit;
+                }
+            }
+            $result = $teacher->insertPhase($payload);
+            echo json_encode($result);
+            break;
+            
+        case 'insertDiscussion':
+            $requiredFields = ['discussion_text', 'user_id', 'phase_project_id'];
+            foreach ($requiredFields as $field) {
+                if (empty($payload[$field])) {
+                    echo json_encode(['status' => 'error', 'message' => ucfirst(str_replace('_', ' ', $field)) . ' is required']);
+                    exit;
+                }
+            }
+            $result = $teacher->insertDiscussion($payload);
+            echo json_encode($result);
+            break;
+            
+        case 'uploadPhaseFile':
+            // Handle JSON-based file upload with base64 encoded content
+            if (empty($payload['phase_project_id']) || empty($payload['user_id']) || empty($payload['file']) || empty($payload['file_name'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Phase project ID, user ID, file content, and file name are required']);
+                exit;
+            }
+            
+            $result = $teacher->uploadPhaseFileFromJson($payload);
+            echo json_encode($result);
+            break;
+            
+        case 'fetchPhasesProjectDetail':
+            if (empty($payload['phase_project_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Phase Project ID is required']);
+                exit;
+            }
+            $result = $teacher->fetchPhasesProjectDetailById($payload['phase_project_id']);
             echo json_encode($result);
             break;
             
