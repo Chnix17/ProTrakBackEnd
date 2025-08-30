@@ -319,9 +319,30 @@ class Teacher {
         }
     }
     
-    public function fetchPhasesProjectDetailById($phaseProjectId) {
+    public function fetchPhasesProjectDetailById($phaseMainId) {
         try {
-            // Fetch phase project basic info
+            // First, get the phase_project_id using phase_project_phase_id
+            $idSql = "SELECT phase_project_id, phase_project_main_id 
+                     FROM tbl_phase_project 
+                     WHERE phase_project_phase_id = :phase_main_id 
+                     LIMIT 1";
+            
+            $stmt = $this->conn->prepare($idSql);
+            $stmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
+            $stmt->execute();
+            $phaseIds = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$phaseIds) {
+                return [
+                    'status' => 'error',
+                    'message' => 'No phase project found for the given phase_main_id'
+                ];
+            }
+            
+            $phaseProjectId = $phaseIds['phase_project_id'];
+            $phaseProjectMainId = $phaseIds['phase_project_main_id'];
+
+            // Then fetch the full phase project details
             $phaseSql = "SELECT pp.*, pm.phase_main_name, pm.phase_main_description,
                                pm.phase_start_date, pm.phase_end_date,
                                u.users_fname, u.users_mname, u.users_lname
@@ -344,16 +365,19 @@ class Teacher {
                          CASE 
                              WHEN s.phase_project_status_status_id = 1 THEN 'In Progress'
                              WHEN s.phase_project_status_status_id = 2 THEN 'Completed'
-                             WHEN s.phase_project_status_status_id = 3 THEN 'On Hold'
+                             WHEN s.phase_project_status_status_id = 3 THEN 'Under Review'
+                             WHEN s.phase_project_status_status_id = 4 THEN 'Revision Nedded'
+                             WHEN s.phase_project_status_status_id = 5 THEN 'Approved'
                              ELSE 'Pending'
                          END as status_name
                          FROM tbl_phase_project_status s
-                         WHERE s.phase_project_id = :phase_project_id
+                         JOIN tbl_phase_project pp ON s.phase_project_id = pp.phase_project_id
+                         WHERE pp.phase_project_phase_id = :phase_main_id
                          ORDER BY s.phase_project_status_created_at DESC
                          LIMIT 1";
             
             $statusStmt = $this->conn->prepare($statusSql);
-            $statusStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $statusStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
             $statusStmt->execute();
             $status = $statusStmt->fetch(PDO::FETCH_ASSOC);
             
@@ -361,11 +385,12 @@ class Teacher {
             $discussionSql = "SELECT d.*, u.users_fname, u.users_mname, u.users_lname
                              FROM tbl_phase_discussion d
                              LEFT JOIN tbl_users u ON d.phase_discussion_user_id = u.users_id
-                             WHERE d.phase_discussion_phase_project_id = :phase_project_id
+                             JOIN tbl_phase_project pp ON d.phase_discussion_phase_project_id = pp.phase_project_id
+                         WHERE pp.phase_project_phase_id = :phase_main_id
                              ORDER BY d.phase_discussion_created_at DESC";
             
             $discussionStmt = $this->conn->prepare($discussionSql);
-            $discussionStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $discussionStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
             $discussionStmt->execute();
             $discussions = $discussionStmt->fetchAll(PDO::FETCH_ASSOC);
             
@@ -373,11 +398,12 @@ class Teacher {
             $filesSql = "SELECT f.*, u.users_fname, u.users_mname, u.users_lname
                         FROM tbl_phase_project_files f
                         LEFT JOIN tbl_users u ON f.phase_file_created_by = u.users_id
-                        WHERE f.phase_project_id = :phase_project_id
+                        JOIN tbl_phase_project pp ON f.phase_project_id = pp.phase_project_id
+                        WHERE pp.phase_project_phase_id = :phase_main_id
                         ORDER BY f.phase_file_created_at DESC";
             
             $filesStmt = $this->conn->prepare($filesSql);
-            $filesStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $filesStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
             $filesStmt->execute();
             $files = $filesStmt->fetchAll(PDO::FETCH_ASSOC);
             
@@ -386,17 +412,20 @@ class Teacher {
                                CASE 
                                    WHEN s.phase_project_status_status_id = 1 THEN 'In Progress'
                                    WHEN s.phase_project_status_status_id = 2 THEN 'Completed'
-                                   WHEN s.phase_project_status_status_id = 3 THEN 'On Hold'
+                                   WHEN s.phase_project_status_status_id = 3 THEN 'Under Review'
+                                   WHEN s.phase_project_status_status_id = 4 THEN 'Revision Nedded'
+                                   WHEN s.phase_project_status_status_id = 5 THEN 'Approved'
                                    ELSE 'Pending'
                                END as status_name,
                                u.users_fname, u.users_mname, u.users_lname
                                FROM tbl_phase_project_status s
                                LEFT JOIN tbl_users u ON s.phase_project_status_created_by = u.users_id
-                               WHERE s.phase_project_id = :phase_project_id
+                               JOIN tbl_phase_project pp ON s.phase_project_id = pp.phase_project_id
+                               WHERE pp.phase_project_phase_id = :phase_main_id
                                ORDER BY s.phase_project_status_created_at DESC";
             
             $statusHistoryStmt = $this->conn->prepare($statusHistorySql);
-            $statusHistoryStmt->bindParam(':phase_project_id', $phaseProjectId, PDO::PARAM_INT);
+            $statusHistoryStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
             $statusHistoryStmt->execute();
             $statusHistory = $statusHistoryStmt->fetchAll(PDO::FETCH_ASSOC);
             
@@ -939,57 +968,43 @@ class Teacher {
                     (project_main_master_id, project_title, project_description, project_created_by_user_id, project_is_active) 
                     VALUES (:project_main_master_id, :project_title, :project_description, :project_created_by_user_id, :project_is_active)";
             
+            // First, insert the project
             $stmt = $this->conn->prepare($sql);
+            $stmt->execute([
+                ':project_main_master_id' => $data['project_main_master_id'],
+                ':project_title' => $data['project_title'],
+                ':project_description' => $data['project_description'],
+                ':project_created_by_user_id' => $data['project_created_by_user_id'],
+                ':project_is_active' => 1
+            ]);
             
-            $stmt->bindParam(':project_main_master_id', $data['project_main_master_id'], PDO::PARAM_INT);
-            $stmt->bindParam(':project_title', $data['project_title'], PDO::PARAM_STR);
-            $stmt->bindParam(':project_description', $data['project_description'], PDO::PARAM_STR);
-            $stmt->bindParam(':project_created_by_user_id', $data['project_created_by_user_id'], PDO::PARAM_INT);
-            // Always set project_is_active to 0
-            $isActive = 0;
-            $stmt->bindParam(':project_is_active', $isActive, PDO::PARAM_INT);
-            
-            $stmt->execute();
+            // Get the ID of the newly created project
             $projectMainId = $this->conn->lastInsertId();
             
-            // Insert project creator as a member
-            if (isset($data['project_created_by_user_id'])) {
-                $memberSql = "INSERT INTO tbl_project_members 
-                             (project_users_id, project_main_id, project_members_joined_at) 
-                             VALUES (:user_id, :project_main_id, NOW())";
-                
-                $memberStmt = $this->conn->prepare($memberSql);
-                $memberStmt->bindParam(':user_id', $data['project_created_by_user_id'], PDO::PARAM_INT);
-                $memberStmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
-                $memberStmt->execute();
-            }
+            // Insert the creator as a project member
+            $sql = "INSERT INTO `tbl_project_members` 
+                    (`project_main_id`, `project_users_id`, `is_active`)
+                    VALUES (:project_main_id, :project_users_id, 0)";
             
-            // Add additional members if provided
-            if (!empty($data['members']) && is_array($data['members'])) {
-                $memberSql = "INSERT INTO tbl_project_members 
-                             (project_users_id, project_main_id, project_members_joined_at) 
-                             VALUES ";
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([
+                ':project_main_id' => $projectMainId,
+                ':project_users_id' => $data['project_created_by_user_id']
+            ]);
+            
+            // Add other team members if any
+            if (!empty($data['team_members'])) {
+                $sql = "INSERT INTO `tbl_project_members` 
+                        (`project_main_id`, `project_users_id`, `is_active`)
+                        VALUES (:project_main_id, :project_users_id, 0)";
                 
-                $insertValues = [];
-                $params = [];
-                $i = 0;
+                $stmt = $this->conn->prepare($sql);
                 
-                foreach ($data['members'] as $memberId) {
-                    $insertValues[] = "(:user_id_$i, :project_main_id_$i, NOW())";
-                    $params["user_id_$i"] = $memberId;
-                    $params["project_main_id_$i"] = $projectMainId;
-                    $i++;
-                }
-                
-                if (!empty($insertValues)) {
-                    $memberSql .= implode(", ", $insertValues);
-                    $memberStmt = $this->conn->prepare($memberSql);
-                    
-                    foreach ($params as $key => $value) {
-                        $memberStmt->bindValue(":$key", $value, PDO::PARAM_INT);
-                    }
-                    
-                    $memberStmt->execute();
+                foreach ($data['team_members'] as $memberId) {
+                    $stmt->execute([
+                        ':project_main_id' => $projectMainId,
+                        ':project_users_id' => $memberId
+                    ]);
                 }
             }
             
@@ -1008,6 +1023,32 @@ class Teacher {
             return [
                 'status' => 'error',
                 'message' => 'Error saving project main: ' . $e->getMessage()
+            ];
+        }
+    }
+    
+    public function fetchAnnouncements($projectMasterId) {
+        try {
+            $sql = "SELECT a.*, CONCAT(u.users_fname, ' ', u.users_lname) as author_name
+                    FROM `tbl_announcement` a
+                    JOIN `tbl_users` u ON a.created_by = u.users_id
+                    WHERE a.project_master_id = :project_master_id
+                    ORDER BY a.created_at DESC";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([':project_master_id' => (int)$projectMasterId]);
+            
+            $announcements = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            return [
+                'status' => 'success',
+                'data' => $announcements
+            ];
+            
+        } catch(PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Error fetching announcements: ' . $e->getMessage()
             ];
         }
     }
@@ -1101,11 +1142,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             break;
             
         case 'fetchPhasesProjectDetail':
-            if (empty($payload['phase_project_id'])) {
-                echo json_encode(['status' => 'error', 'message' => 'Phase Project ID is required']);
+            // Debug: Log the received payload
+            error_log('Received payload: ' . print_r($payload, true));
+            
+            // Handle both payload formats
+            $phaseMainId = null;
+            if (isset($payload['payload']['phase_main_id'])) {
+                // Format: {"operation":"...", "payload":{"phase_main_id":3}}
+                $phaseMainId = $payload['payload']['phase_main_id'];
+            } elseif (isset($payload['phase_main_id'])) {
+                // Format: {"operation":"...", "phase_main_id":3}
+                $phaseMainId = $payload['phase_main_id'];
+            }
+            
+            if (empty($phaseMainId)) {
+                error_log('Missing phase_main_id in payload');
+                echo json_encode([
+                    'status' => 'error', 
+                    'message' => 'Phase Main ID is required',
+                    'received_payload' => $payload,
+                    'hint' => 'Please provide phase_main_id in the payload'
+                ]);
                 exit;
             }
-            $result = $teacher->fetchPhasesProjectDetailById($payload['phase_project_id']);
+            
+            $result = $teacher->fetchPhasesProjectDetailById($phaseMainId);
             echo json_encode($result);
             break;
             
@@ -1157,6 +1218,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
             $result = $teacher->saveJoinedWorkspace($payload);
+            echo json_encode($result);
+            break;
+            
+        case 'fetchAnnouncements':
+            if (empty($payload['project_master_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Project Master ID is required']);
+                exit;
+            }
+            $result = $teacher->fetchAnnouncements($payload['project_master_id']);
             echo json_encode($result);
             break;
             

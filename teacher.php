@@ -240,6 +240,323 @@ class Teacher {
             ]);
         }
     }
+
+    // Update review status for phase project
+    public function updateReview($data) {
+        try {
+            $phaseProjectId = (int)($data['phase_project_id'] ?? 0);
+            $createdBy = (int)($data['phase_project_status_created_by'] ?? $data['created_by'] ?? 0);
+
+            if ($phaseProjectId <= 0 || $createdBy <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'phase_project_id and created_by are required']);
+            }
+
+            // Insert new status record with status_id = 2
+            $sql = "INSERT INTO `tbl_phase_project_status` 
+                    (`phase_project_id`, `phase_project_status_status_id`, `phase_project_status_created_by`) 
+                    VALUES (:phase_project_id, 3, :created_by)";
+
+            $stmt = $this->conn->prepare($sql);
+            $params = [
+                ':phase_project_id' => $phaseProjectId,
+                ':created_by' => $createdBy
+            ];
+            
+            $success = $stmt->execute($params);
+
+            if ($success) {
+                return json_encode([
+                    'status' => 'success',
+                    'message' => 'Review status updated successfully',
+                    'phase_project_status_id' => $this->conn->lastInsertId(),
+                    'status_id' => 2
+                ]);
+            } else {
+                return json_encode(['status' => 'error', 'message' => 'Failed to update review status']);
+            }
+
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    public function insertRevisions($data) {
+        try {
+            // Validate required fields
+            $requiredFields = ['revision_phase_project_id', 'revision_created_by'];
+            foreach ($requiredFields as $field) {
+                if (empty($data[$field])) {
+                    return json_encode(['status' => 'error', 'message' => "Missing required field: $field"]);
+                }
+            }
+            
+            // Prepare SQL statement
+            $sql = "INSERT INTO tbl_revision_phase 
+                    (revision_phase_project_id, revision_file, revision_feed_back, revision_created_by) 
+                    VALUES 
+                    (:revision_phase_project_id, :revision_file, :revision_feed_back, :revision_created_by)";
+            
+            $stmt = $this->conn->prepare($sql);
+            
+            // Bind parameters
+            $stmt->bindValue(':revision_phase_project_id', $data['revision_phase_project_id']);
+            $stmt->bindValue(':revision_file', $data['revision_file'] ?? null);
+            $stmt->bindValue(':revision_feed_back', $data['revision_feed_back'] ?? null);
+            $stmt->bindValue(':revision_created_by', $data['revision_created_by']);
+            
+            $stmt->execute();
+            
+            return json_encode([
+                'status' => 'success', 
+                'message' => 'Revision inserted successfully',
+                'revision_id' => $this->conn->lastInsertId()
+            ]);
+            
+        } catch (PDOException $e) {
+            return json_encode(['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()]);
+        }
+    }
+    
+    public function fetchRevisions($projectId) {
+        try {
+            $projectId = (int)$projectId;
+            if ($projectId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'Valid project ID is required']);
+            }
+
+            $sql = "SELECT `revision_phase_id`, `revision_phase_project_id`, `revision_file`, 
+                           `revised_file`, `revision_feed_back`, `revision_created_by`, `revision_updated_at`
+                    FROM `tbl_revision_phase` 
+                    WHERE `revision_phase_project_id` = :project_id
+                    ORDER BY `revision_updated_at` DESC";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindValue(':project_id', $projectId, PDO::PARAM_INT);
+            $stmt->execute();
+            
+            $revisions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            return json_encode([
+                'status' => 'success',
+                'data' => $revisions,
+                'count' => count($revisions)
+            ]);
+            
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Failed to fetch revisions: ' . $e->getMessage()
+            ]);
+        }
+    }
+    
+    public function updateRevision($data) {
+        try {
+            $phaseProjectId = (int)($data['phase_project_id'] ?? 0);
+            $createdBy = (int)($data['phase_project_status_created_by'] ?? $data['created_by'] ?? 0);
+
+            if ($phaseProjectId <= 0 || $createdBy <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'phase_project_id and created_by are required']);
+            }
+
+            // Insert new status record with status_id = 4 (for revision)
+            $sql = "INSERT INTO `tbl_phase_project_status` 
+                    (`phase_project_id`, `phase_project_status_status_id`, `phase_project_status_created_by`) 
+                    VALUES (:phase_project_id, 4, :created_by)";
+
+            $stmt = $this->conn->prepare($sql);
+            $params = [
+                ':phase_project_id' => $phaseProjectId,
+                ':created_by' => $createdBy
+            ];
+            
+            $success = $stmt->execute($params);
+
+            if ($success) {
+                return json_encode([
+                    'status' => 'success',
+                    'message' => 'Revision status updated successfully',
+                    'phase_project_status_id' => $this->conn->lastInsertId(),
+                    'status_id' => 4
+                ]);
+            } else {
+                return json_encode(['status' => 'error', 'message' => 'Failed to update revision status']);
+            }
+
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
+    
+    // Approve or fail a phase project and insert appropriate status (5 for approve, 7 for fail)
+    public function updateApprovePhase($data) {
+        try {
+            $phaseProjectId = (int)($data['phase_project_id'] ?? 0);
+            $createdBy = (int)($data['phase_project_status_created_by'] ?? $data['created_by'] ?? 0);
+            // Accept multiple truthy/falsy representations
+            $approveRaw = $data['approve'] ?? $data['is_approved'] ?? $data['approved'] ?? null;
+            $approve = null;
+            if (is_bool($approveRaw)) {
+                $approve = $approveRaw;
+            } elseif (is_string($approveRaw)) {
+                $approve = in_array(strtolower($approveRaw), ['1','true','yes','y'], true);
+            } elseif (is_numeric($approveRaw)) {
+                $approve = ((int)$approveRaw) === 1;
+            }
+
+            if ($phaseProjectId <= 0 || $createdBy <= 0 || $approve === null) {
+                return json_encode(['status' => 'error', 'message' => 'phase_project_id, created_by, and approve (boolean) are required']);
+            }
+
+            $statusId = $approve ? 5 : 7;
+
+            $sql = "INSERT INTO `tbl_phase_project_status` 
+                    (`phase_project_id`, `phase_project_status_status_id`, `phase_project_status_created_by`) 
+                    VALUES (:phase_project_id, :status_id, :created_by)";
+
+            $stmt = $this->conn->prepare($sql);
+            $params = [
+                ':phase_project_id' => $phaseProjectId,
+                ':status_id' => $statusId,
+                ':created_by' => $createdBy
+            ];
+
+            $success = $stmt->execute($params);
+
+            if ($success) {
+                return json_encode([
+                    'status' => 'success',
+                    'message' => $approve ? 'Phase approved' : 'Phase marked as failed',
+                    'phase_project_status_id' => $this->conn->lastInsertId(),
+                    'status_id' => $statusId,
+                    'approved' => $approve
+                ]);
+            }
+
+            return json_encode(['status' => 'error', 'message' => 'Failed to update approval status']);
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
+    
+    public function fetchPhasesProjectDetail($data) {
+        try {
+            $phaseProjectId = (int)($data['phase_project_id'] ?? 0);
+            $phaseProjectMainId = (int)($data['phase_project_main_id'] ?? 0);
+            
+            if ($phaseProjectId <= 0 || $phaseProjectMainId <= 0) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Both phase_project_id and phase_project_main_id are required and must be greater than 0'
+                ]);
+            }
+
+            $sql = "SELECT 
+                        pp.phase_project_id, 
+                        pp.phase_project_phase_id, 
+                        pp.phase_project_main_id, 
+                        pp.phase_project_created_at,
+                        pp.phase_created_by,
+                        pp.phase_project_discussion_text,
+                        u.users_fname,
+                        u.users_lname
+                    FROM `tbl_phase_project` pp
+                    LEFT JOIN tbl_users u ON pp.phase_created_by = u.users_id
+                    WHERE pp.phase_project_id = :phase_project_id 
+                    AND pp.phase_project_main_id = :phase_project_main_id";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([
+                ':phase_project_id' => $phaseProjectId,
+                ':phase_project_main_id' => $phaseProjectMainId
+            ]);
+            
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($result) {
+                return json_encode([
+                    'status' => 'success',
+                    'data' => [
+                        'phase_project_id' => (int)$result['phase_project_id'],
+                        'phase_project_phase_id' => (int)$result['phase_project_phase_id'],
+                        'phase_project_main_id' => (int)$result['phase_project_main_id'],
+                        'phase_project_created_at' => $result['phase_project_created_at'],
+                        'phase_created_by' => (int)$result['phase_created_by'],
+                        'creator_name' => trim($result['users_fname'] . ' ' . $result['users_lname']),
+                        'discussion_text' => $result['phase_project_discussion_text']
+                    ]
+                ]);
+            } else {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'No phase project found with the given IDs'
+                ]);
+            }
+            
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
+    
+    public function insertAnnouncement($data) {
+        try {
+            // Map input fields to database fields with fallbacks
+            $announcementTitle = $data['announcement_title'] ?? '';
+            $announcementText = $data['announcement_content'] ?? $data['announcement_text'] ?? '';
+            $projectMasterId = (int)($data['announcement_project_master_id'] ?? $data['project_master_id'] ?? 0);
+            $userId = (int)($data['announcement_user_id'] ?? $data['created_by'] ?? 0);
+            
+            // Validate required fields
+            if (empty($announcementTitle) || empty($announcementText) || $projectMasterId <= 0 || $userId <= 0) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'Missing required fields. Required: announcement_title, announcement_content, project_master_id, created_by'
+                ]);
+            }
+            
+            $sql = "INSERT INTO `tbl_announcement` 
+                    (`announcement_title`, `announcement_text`, `announcement_project_master_id`, `announcement_user_id`)
+                    VALUES (:announcement_title, :announcement_text, :project_master_id, :user_id)";
+            
+            $stmt = $this->conn->prepare($sql);
+            $params = [
+                ':announcement_title' => $announcementTitle,
+                ':announcement_text' => $announcementText,
+                ':project_master_id' => $projectMasterId,
+                ':user_id' => $userId
+            ];
+            
+            $success = $stmt->execute($params);
+            
+            if ($success) {
+                return json_encode([
+                    'status' => 'success',
+                    'message' => 'Announcement created successfully',
+                    'announcement_id' => $this->conn->lastInsertId()
+                ]);
+            } else {
+                return json_encode(['status' => 'error', 'message' => 'Failed to create announcement']);
+            }
+            
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
 }
 
 // Handle the request
@@ -288,6 +605,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $result = $teacher->fetchAllProjects($masterId);
             echo json_encode($result);
+            break;
+        case 'updateReview':
+            echo $teacher->updateReview($payload);
+            break;
+            
+        case 'insertRevisions':
+            echo $teacher->insertRevisions($payload);
+            break;
+            
+        case 'fetchRevisions':
+            $projectId = $payload['project_id'] ?? 0;
+            echo $teacher->fetchRevisions($projectId);
+            break;
+            
+        case 'updateRevision':
+            echo $teacher->updateRevision($payload);
+            break;
+            
+        case 'insertAnnouncement':
+            echo $teacher->insertAnnouncement($payload);
+            break;
+        case 'updateApprovePhase':
+            echo $teacher->updateApprovePhase($payload);
+            break;
+            
+        case 'fetchPhasesProjectDetail':
+            echo $teacher->fetchPhasesProjectDetail($payload);
             break;
         default:
             echo json_encode(['status' => 'error', 'message' => 'Invalid operation']);
