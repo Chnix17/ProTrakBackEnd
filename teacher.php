@@ -557,6 +557,109 @@ class Teacher {
             ]);
         }
     }
+
+    public function insertTask($data) {
+        try {
+            // Validate required fields for task
+            $requiredFields = ['project_project_main_id', 'project_task_name', 'project_assigned_by'];
+            foreach ($requiredFields as $field) {
+                if (empty($data[$field])) {
+                    return json_encode([
+                        'status' => 'error', 
+                        'message' => "Missing required field: $field"
+                    ]);
+                }
+            }
+
+            // Extract task data
+            $projectMainId = (int)$data['project_project_main_id'];
+            $taskName = trim($data['project_task_name']);
+            $priorityId = (int)($data['project_priority_id'] ?? 1); // Default priority if not provided
+            $assignedBy = (int)$data['project_assigned_by'];
+            $startDate = $data['project_start_date'] ?? null;
+            $endDate = $data['project_end_date'] ?? null;
+            $assignedUsers = $data['assigned_users'] ?? []; // Array of user IDs to assign
+
+            // Start transaction for atomic operations
+            $this->conn->beginTransaction();
+
+            try {
+                // Insert into tbl_project_task
+                $taskSql = "INSERT INTO `tbl_project_task` 
+                           (`project_project_main_id`, `project_task_name`, `project_priority_id`, 
+                            `project_assigned_by`, `project_start_date`, `project_end_date`) 
+                           VALUES (:project_main_id, :task_name, :priority_id, :assigned_by, :start_date, :end_date)";
+
+                $taskStmt = $this->conn->prepare($taskSql);
+                $taskParams = [
+                    ':project_main_id' => $projectMainId,
+                    ':task_name' => $taskName,
+                    ':priority_id' => $priorityId,
+                    ':assigned_by' => $assignedBy,
+                    ':start_date' => $startDate,
+                    ':end_date' => $endDate
+                ];
+
+                $taskStmt->execute($taskParams);
+                $taskId = $this->conn->lastInsertId();
+
+                // Insert assignments into tbl_project_assigned (can have multiple users for one task)
+                $assignmentResults = [];
+                if (!empty($assignedUsers) && is_array($assignedUsers)) {
+                    $assignSql = "INSERT INTO `tbl_project_assigned` 
+                                 (`project_task_id`, `project_user_id`) 
+                                 VALUES (:task_id, :user_id)";
+                    
+                    $assignStmt = $this->conn->prepare($assignSql);
+                    
+                    foreach ($assignedUsers as $userId) {
+                        $userId = (int)$userId;
+                        if ($userId > 0) {
+                            $assignStmt->execute([
+                                ':task_id' => $taskId,
+                                ':user_id' => $userId
+                            ]);
+                            $assignmentResults[] = [
+                                'project_assigned_id' => $this->conn->lastInsertId(),
+                                'project_task_id' => $taskId,
+                                'project_user_id' => $userId
+                            ];
+                        }
+                    }
+                }
+
+                $this->conn->commit();
+
+                return json_encode([
+                    'status' => 'success',
+                    'message' => 'Task created successfully',
+                    'data' => [
+                        'project_task_id' => $taskId,
+                        'project_project_main_id' => $projectMainId,
+                        'project_task_name' => $taskName,
+                        'project_priority_id' => $priorityId,
+                        'project_assigned_by' => $assignedBy,
+                        'project_start_date' => $startDate,
+                        'project_end_date' => $endDate,
+                        'assignments' => $assignmentResults
+                    ]
+                ]);
+
+            } catch (Exception $e) {
+                $this->conn->rollBack();
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Failed to create task: ' . $e->getMessage()
+                ]);
+            }
+
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
 }
 
 // Handle the request
@@ -632,6 +735,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
         case 'fetchPhasesProjectDetail':
             echo $teacher->fetchPhasesProjectDetail($payload);
+            break;
+            
+        case 'insertTask':
+            echo $teacher->insertTask($payload);
             break;
         default:
             echo json_encode(['status' => 'error', 'message' => 'Invalid operation']);

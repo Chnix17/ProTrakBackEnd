@@ -17,6 +17,152 @@ class Teacher {
         $this->conn = $conn;
     }
     
+    public function updateMemberRating($projectUsersId, $projectMainId, $rating) {
+        try {
+            // Validate that rating is a whole number
+            if (!is_numeric($rating) || (int)$rating != $rating) {
+                return ['status' => 'error', 'message' => 'Rating must be a whole number'];
+            }
+            
+            $rating = (int)$rating; // Ensure it's an integer
+            
+            $stmt = $this->conn->prepare("UPDATE `tbl_project_members` 
+                SET `project_member_rating` = :rating 
+                WHERE `project_users_id` = :projectUsersId 
+                AND `project_main_id` = :projectMainId");
+                
+            $stmt->bindParam(':rating', $rating, PDO::PARAM_INT);
+            $stmt->bindParam(':projectUsersId', $projectUsersId, PDO::PARAM_INT);
+            $stmt->bindParam(':projectMainId', $projectMainId, PDO::PARAM_INT);
+            $stmt->execute();
+            
+            if ($stmt->rowCount() > 0) {
+                return ['status' => 'success', 'message' => 'Member rating updated successfully'];
+            } else {
+                return ['status' => 'error', 'message' => 'No matching record found to update'];
+            }
+        } catch (PDOException $e) {
+            return ['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()];
+        }
+    }
+    
+    public function insertJoined($data) {
+        try {
+            // Validate required fields
+            if (!isset($data['student_user_id']) || empty($data['student_project_master_id'])) {
+                return [
+                    'status' => 'error',
+                    'message' => 'student_user_id and student_project_master_id are required'
+                ];
+            }
+
+            $projectMasterId = (int)$data['student_project_master_id'];
+            // Normalize to array of unique integer IDs
+            $userIds = is_array($data['student_user_id']) ? $data['student_user_id'] : [$data['student_user_id']];
+            $userIds = array_values(array_unique(array_map('intval', $userIds)));
+
+            if (empty($userIds)) {
+                return [
+                    'status' => 'error',
+                    'message' => 'No valid student_user_id provided'
+                ];
+            }
+
+            // Begin transaction for batch insert
+            $this->conn->beginTransaction();
+
+            $checkSql = "SELECT student_joined_id FROM tbl_student_joined 
+                         WHERE student_user_id = :student_user_id 
+                         AND student_project_master_id = :student_project_master_id";
+            $checkStmt = $this->conn->prepare($checkSql);
+
+            $insertSql = "INSERT INTO tbl_student_joined 
+                          (student_user_id, student_project_master_id, student_joined_date) 
+                          VALUES (:student_user_id, :student_project_master_id, NOW())";
+            $insertStmt = $this->conn->prepare($insertSql);
+
+            $inserted = [];
+            $skipped = [];
+
+            foreach ($userIds as $uid) {
+                // Skip invalid id
+                if ($uid <= 0) { $skipped[] = ['user_id' => $uid, 'reason' => 'invalid_user_id']; continue; }
+
+                // Duplicate check
+                $checkStmt->bindParam(':student_user_id', $uid, PDO::PARAM_INT);
+                $checkStmt->bindParam(':student_project_master_id', $projectMasterId, PDO::PARAM_INT);
+                $checkStmt->execute();
+
+                if ($checkStmt->rowCount() > 0) {
+                    $skipped[] = ['user_id' => $uid, 'reason' => 'already_joined'];
+                    continue;
+                }
+
+                // Insert
+                $insertStmt->bindParam(':student_user_id', $uid, PDO::PARAM_INT);
+                $insertStmt->bindParam(':student_project_master_id', $projectMasterId, PDO::PARAM_INT);
+                $insertStmt->execute();
+                $inserted[] = ['user_id' => $uid, 'student_joined_id' => $this->conn->lastInsertId()];
+            }
+
+            $this->conn->commit();
+
+            return [
+                'status' => 'success',
+                'message' => 'Processed student join requests',
+                'data' => [
+                    'inserted' => $inserted,
+                    'skipped' => $skipped,
+                    'total_inserted' => count($inserted),
+                    'total_skipped' => count($skipped)
+                ]
+            ];
+        } catch (PDOException $e) {
+            if ($this->conn->inTransaction()) {
+                $this->conn->rollBack();
+            }
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    public function updateCollaboratorStatus($projectMembersId, $accepted) {
+        try {
+            if (empty($projectMembersId)) {
+                return ['status' => 'error', 'message' => 'project_members_id is required'];
+            }
+
+            // Map accepted flag to is_active value: 1 for accepted, -1 for declined
+            $isActive = ($accepted) ? 1 : -1;
+
+            $sql = "UPDATE tbl_project_members
+                    SET is_active = :is_active
+                    WHERE project_members_id = :project_members_id";
+
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':is_active', $isActive, PDO::PARAM_INT);
+            $stmt->bindParam(':project_members_id', $projectMembersId, PDO::PARAM_INT);
+            $stmt->execute();
+
+            if ($stmt->rowCount() === 0) {
+                return ['status' => 'error', 'message' => 'No matching collaborator found or no change'];
+            }
+
+            return [
+                'status' => 'success',
+                'message' => 'Collaborator status updated',
+                'data' => [
+                    'project_members_id' => (int)$projectMembersId,
+                    'is_active' => $isActive
+                ]
+            ];
+        } catch (PDOException $e) {
+            return ['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()];
+        }
+    }
+    
     public function findProjectMasterByCode($projectCode) {
         try {
             $sql = "SELECT `project_master_id`, `project_title`, `project_description`, `project_code`, `project_teacher_id`, `project_is_active`, `project_school_year_id` 
@@ -33,6 +179,38 @@ class Teacher {
                 return ['status' => 'success', 'data' => $result];
             } else {
                 return ['status' => 'error', 'message' => 'Project not found'];
+            }
+            
+        } catch(PDOException $e) {
+            return ['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()];
+        }
+    }
+    
+    public function updateFIleRevise($data) {
+        try {
+            // Validate required fields
+            if (empty($data['revision_phase_id']) || empty($data['revised_file'])) {
+                return ['status' => 'error', 'message' => 'Revision ID and revised file are required'];
+            }
+
+            // Prepare the update query
+            $sql = "UPDATE `tbl_revision_phase` 
+                    SET `revised_file` = :revised_file, 
+                        `revision_updated_at` = NOW()
+                    WHERE `revision_phase_id` = :revision_phase_id";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':revised_file', $data['revised_file'], PDO::PARAM_STR);
+            $stmt->bindParam(':revision_phase_id', $data['revision_phase_id'], PDO::PARAM_INT);
+            
+            if ($stmt->execute()) {
+                return [
+                    'status' => 'success', 
+                    'message' => 'File revision updated successfully',
+                    'revision_phase_id' => $data['revision_phase_id']
+                ];
+            } else {
+                return ['status' => 'error', 'message' => 'Failed to update file revision'];
             }
             
         } catch(PDOException $e) {
@@ -667,90 +845,102 @@ class Teacher {
         }
     }
     
-    public function fetchCollaborator($userId) {
+    public function insertInvitedStudent($data) {
         try {
-            // First, get all project_main_id where the user is a member but not the creator
-            $memberSql = "SELECT DISTINCT pm.project_main_id 
-                         FROM tbl_project_members pm
-                         INNER JOIN tbl_project_main pmm ON pm.project_main_id = pmm.project_main_id
-                         WHERE pm.project_users_id = :userId 
-                         AND pmm.project_created_by_user_id != :userId2";
-            
-            $memberStmt = $this->conn->prepare($memberSql);
-            $memberStmt->bindParam(':userId', $userId, PDO::PARAM_INT);
-            $memberStmt->bindParam(':userId2', $userId, PDO::PARAM_INT);
-            $memberStmt->execute();
-            
-            $projectMainIds = [];
-            while ($row = $memberStmt->fetch(PDO::FETCH_ASSOC)) {
-                $projectMainIds[] = $row['project_main_id'];
-            }
-            
-            if (empty($projectMainIds)) {
+            // Validate required fields
+            if (empty($data['student_user_id']) || empty($data['student_project_master_id'])) {
                 return [
-                    'status' => 'success',
-                    'data' => []
+                    'status' => 'error',
+                    'message' => 'student_user_id and student_project_master_id are required'
                 ];
             }
-            
-            // Now get all projects where the user is a member
-            $placeholders = rtrim(str_repeat('?,', count($projectMainIds)), ',');
-            // Create named placeholders for the IN clause
-            $placeholders = [];
-            foreach ($projectMainIds as $key => $id) {
-                $param = ":id_" . $key;
-                $placeholders[] = $param;
-                $params[$param] = $id;
+
+            // Optional: prevent duplicate entries for the same student and master project
+            $checkSql = "SELECT student_joined_id FROM tbl_student_joined 
+                        WHERE student_user_id = :student_user_id 
+                        AND student_project_master_id = :student_project_master_id";
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->bindParam(':student_user_id', $data['student_user_id'], PDO::PARAM_INT);
+            $checkStmt->bindParam(':student_project_master_id', $data['student_project_master_id'], PDO::PARAM_INT);
+            $checkStmt->execute();
+
+            if ($checkStmt->rowCount() > 0) {
+                return [
+                    'status' => 'error',
+                    'message' => 'Student is already joined or invited to this project'
+                ];
             }
-            $placeholders = implode(',', $placeholders);
+
+            // Insert invited student record
+            $sql = "INSERT INTO tbl_student_joined 
+                    (student_user_id, student_project_master_id, student_joined_date) 
+                    VALUES (:student_user_id, :student_project_master_id, NOW())";
             
-            $sql = "SELECT 
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':student_user_id', $data['student_user_id'], PDO::PARAM_INT);
+            $stmt->bindParam(':student_project_master_id', $data['student_project_master_id'], PDO::PARAM_INT);
+            $stmt->execute();
+
+            return [
+                'status' => 'success',
+                'message' => 'Invited student inserted successfully',
+                'id' => $this->conn->lastInsertId()
+            ];
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+    
+    public function fetchCollaborator($userId) {
+        try {
+            // Return all projects from tbl_project_main where the user appears in tbl_project_members
+            $sql = "SELECT DISTINCT
                         pm.project_main_id,
                         pm.project_title,
                         pm.project_description,
                         pm.project_main_master_id,
                         pm.project_created_by_user_id,
                         pm.project_is_active,
+                        m.project_members_id,
+                        m.is_active AS member_is_active,
                         u.users_fname,
                         u.users_lname,
                         (SELECT COUNT(*) FROM tbl_project_members WHERE project_main_id = pm.project_main_id) as member_count
                     FROM tbl_project_main pm
+                    INNER JOIN tbl_project_members m ON m.project_main_id = pm.project_main_id
                     LEFT JOIN tbl_users u ON pm.project_created_by_user_id = u.users_id
-                    WHERE pm.project_main_id IN ($placeholders)
-                    AND pm.project_created_by_user_id != :excludeUserId";
-            
-            // Add the excludeUserId to the params array
-            $params[':excludeUserId'] = $userId;
-            
+                    WHERE m.project_users_id = :userId
+                    AND m.is_active IN (0,1)
+                    AND pm.project_created_by_user_id <> :userId";
+
             $stmt = $this->conn->prepare($sql);
-            
-            // Bind all parameters
-            foreach ($params as $key => &$val) {
-                $paramType = is_int($val) ? PDO::PARAM_INT : PDO::PARAM_STR;
-                $stmt->bindParam($key, $val, $paramType);
-            }
-            
+            $stmt->bindParam(':userId', $userId, PDO::PARAM_INT);
             $stmt->execute();
-            
+
             $projects = [];
             while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                 $projects[] = [
                     'project_main_id' => $row['project_main_id'],
+                    'project_members_id' => $row['project_members_id'],
                     'project_title' => $row['project_title'],
                     'project_description' => $row['project_description'],
                     'project_main_master_id' => $row['project_main_master_id'],
                     'project_created_by_user_id' => $row['project_created_by_user_id'],
-                    'creator_name' => $row['users_fname'] . ' ' . $row['users_lname'],
+                    'creator_name' => trim(($row['users_fname'] ?? '') . ' ' . ($row['users_lname'] ?? '')),
                     'project_is_active' => $row['project_is_active'],
+                    'member_is_active' => isset($row['member_is_active']) ? (int)$row['member_is_active'] : null,
                     'member_count' => (int)$row['member_count']
                 ];
             }
-            
+
             return [
                 'status' => 'success',
                 'data' => $projects
             ];
-            
+
         } catch (PDOException $e) {
             return [
                 'status' => 'error',
@@ -958,6 +1148,63 @@ class Teacher {
         }
     }
     
+    public function fetchStudentByMasterId($projectMasterId) {
+        try {
+            // Validate project master exists
+            $check = $this->conn->prepare("SELECT COUNT(*) AS cnt FROM tbl_project_master WHERE project_master_id = :pmid");
+            $check->bindParam(':pmid', $projectMasterId, PDO::PARAM_INT);
+            $check->execute();
+            $row = $check->fetch(PDO::FETCH_ASSOC);
+            if (!$row || (int)$row['cnt'] === 0) {
+                return [
+                    'status' => 'error',
+                    'message' => 'Project master not found',
+                    'debug' => ['project_master_id' => (int)$projectMasterId]
+                ];
+            }
+
+            // Fetch students not yet joined for this master id
+            $sql = "SELECT 
+                        u.users_id,
+                        u.users_school_id,
+                        u.users_fname,
+                        u.users_mname,
+                        u.users_lname,
+                        u.users_suffix,
+                        u.users_email,
+                        u.users_is_active,
+                        t.title_name,
+                        ul.user_level_name
+                    FROM tbl_users u
+                    LEFT JOIN tbl_title t ON u.users_title_id = t.title_id
+                    LEFT JOIN tbl_user_level ul ON u.users_user_level_id = ul.user_level_id
+                    LEFT JOIN tbl_student_joined sj 
+                        ON sj.student_user_id = u.users_id 
+                        AND sj.student_project_master_id = :project_master_id
+                    WHERE u.users_user_level_id = 3
+                      AND (sj.student_joined_id IS NULL)
+                    ";
+
+            $sql .= " ORDER BY u.users_lname, u.users_fname";
+
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':project_master_id', $projectMasterId, PDO::PARAM_INT);
+            $stmt->execute();
+
+            $students = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            return [
+                'status' => 'success',
+                'data' => $students
+            ];
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Error fetching students by master id: ' . $e->getMessage()
+            ];
+        }
+    }
+    
     public function saveProjectMain($data) {
         // Start transaction
         $this->conn->beginTransaction();
@@ -984,7 +1231,7 @@ class Teacher {
             // Insert the creator as a project member
             $sql = "INSERT INTO `tbl_project_members` 
                     (`project_main_id`, `project_users_id`, `is_active`)
-                    VALUES (:project_main_id, :project_users_id, 0)";
+                    VALUES (:project_main_id, :project_users_id, 1)";
             
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([
@@ -992,15 +1239,26 @@ class Teacher {
                 ':project_users_id' => $data['project_created_by_user_id']
             ]);
             
-            // Add other team members if any
-            if (!empty($data['team_members'])) {
+            // Add other members if any (support both 'team_members' and 'members')
+            $members = [];
+            if (!empty($data['team_members']) && is_array($data['team_members'])) {
+                $members = array_merge($members, $data['team_members']);
+            }
+            if (!empty($data['members']) && is_array($data['members'])) {
+                $members = array_merge($members, $data['members']);
+            }
+            // Sanitize to integers and deduplicate
+            $members = array_unique(array_map('intval', $members));
+            // Remove the creator if present to avoid duplicate insertion
+            $creatorId = (int)$data['project_created_by_user_id'];
+            $members = array_values(array_filter($members, function($id) use ($creatorId) { return $id !== $creatorId; }));
+
+            if (!empty($members)) {
                 $sql = "INSERT INTO `tbl_project_members` 
                         (`project_main_id`, `project_users_id`, `is_active`)
                         VALUES (:project_main_id, :project_users_id, 0)";
-                
                 $stmt = $this->conn->prepare($sql);
-                
-                foreach ($data['team_members'] as $memberId) {
+                foreach ($members as $memberId) {
                     $stmt->execute([
                         ':project_main_id' => $projectMainId,
                         ':project_users_id' => $memberId
@@ -1031,9 +1289,9 @@ class Teacher {
         try {
             $sql = "SELECT a.*, CONCAT(u.users_fname, ' ', u.users_lname) as author_name
                     FROM `tbl_announcement` a
-                    JOIN `tbl_users` u ON a.created_by = u.users_id
-                    WHERE a.project_master_id = :project_master_id
-                    ORDER BY a.created_at DESC";
+                    JOIN `tbl_users` u ON a.announcement_user_id = u.users_id
+                    WHERE a.announcement_project_master_id = :project_master_id
+                    ORDER BY a.announcement_created_at DESC";
             
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([':project_master_id' => (int)$projectMasterId]);
@@ -1053,7 +1311,293 @@ class Teacher {
         }
     }
 
+    public function insertTask($data) {
+        try {
+            // Validate required fields for task
+            $requiredFields = ['project_project_main_id', 'project_task_name', 'project_assigned_by'];
+            foreach ($requiredFields as $field) {
+                if (empty($data[$field])) {
+                    return [
+                        'status' => 'error', 
+                        'message' => "Missing required field: $field"
+                    ];
+                }
+            }
 
+            // Extract task data
+            $projectMainId = (int)$data['project_project_main_id'];
+            $taskName = trim($data['project_task_name']);
+            $priorityId = (int)($data['project_priority_id'] ?? 1); // Default priority if not provided
+            $assignedBy = (int)$data['project_assigned_by'];
+            $startDate = $data['project_start_date'] ?? null;
+            $endDate = $data['project_end_date'] ?? null;
+            $assignedUsers = $data['assigned_users'] ?? []; // Array of user IDs to assign
+
+            // Start transaction for atomic operations
+            $this->conn->beginTransaction();
+
+            try {
+                // Insert into tbl_project_task
+                $taskSql = "INSERT INTO `tbl_project_task` 
+                           (`project_project_main_id`, `project_task_name`, `project_priority_id`, 
+                            `project_assigned_by`, `project_start_date`, `project_end_date`) 
+                           VALUES (:project_main_id, :task_name, :priority_id, :assigned_by, :start_date, :end_date)";
+
+                $taskStmt = $this->conn->prepare($taskSql);
+                $taskParams = [
+                    ':project_main_id' => $projectMainId,
+                    ':task_name' => $taskName,
+                    ':priority_id' => $priorityId,
+                    ':assigned_by' => $assignedBy,
+                    ':start_date' => $startDate,
+                    ':end_date' => $endDate
+                ];
+
+                $taskStmt->execute($taskParams);
+                $taskId = $this->conn->lastInsertId();
+
+                // Insert assignments into tbl_project_assigned (can have multiple users for one task)
+                $assignmentResults = [];
+                if (!empty($assignedUsers) && is_array($assignedUsers)) {
+                    $assignSql = "INSERT INTO `tbl_project_assigned` 
+                                 (`project_task_id`, `project_user_id`) 
+                                 VALUES (:task_id, :user_id)";
+                    
+                    $assignStmt = $this->conn->prepare($assignSql);
+                    
+                    foreach ($assignedUsers as $userId) {
+                        $userId = (int)$userId;
+                        if ($userId > 0) {
+                            $assignStmt->execute([
+                                ':task_id' => $taskId,
+                                ':user_id' => $userId
+                            ]);
+                            $assignmentResults[] = [
+                                'project_assigned_id' => $this->conn->lastInsertId(),
+                                'project_task_id' => $taskId,
+                                'project_user_id' => $userId
+                            ];
+                        }
+                    }
+                }
+
+                $this->conn->commit();
+
+                return [
+                    'status' => 'success',
+                    'message' => 'Task created successfully',
+                    'data' => [
+                        'project_task_id' => $taskId,
+                        'project_project_main_id' => $projectMainId,
+                        'project_task_name' => $taskName,
+                        'project_priority_id' => $priorityId,
+                        'project_assigned_by' => $assignedBy,
+                        'project_start_date' => $startDate,
+                        'project_end_date' => $endDate,
+                        'assignments' => $assignmentResults
+                    ]
+                ];
+
+            } catch (Exception $e) {
+                $this->conn->rollBack();
+                return [
+                    'status' => 'error',
+                    'message' => 'Failed to create task: ' . $e->getMessage()
+                ];
+            }
+
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    public function fetchPriorities() {
+        try {
+            $stmt = $this->conn->query("SELECT `project_priority_id`, `project_priority_name` FROM `tbl_project_priority` WHERE 1");
+            $priorities = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            return [
+                'status' => 'success',
+                'data' => $priorities
+            ];
+            
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Failed to fetch project priorities',
+                'error' => $e->getMessage()
+            ];
+        }
+    }
+    
+    public function fetchMembersByMainId($projectMainId) {
+        try {
+            // First, verify the project exists
+            $checkStmt = $this->conn->prepare("SELECT COUNT(*) as count FROM `tbl_project_main` WHERE `project_main_id` = :projectMainId");
+            $checkStmt->bindParam(':projectMainId', $projectMainId, PDO::PARAM_INT);
+            $checkStmt->execute();
+            $projectExists = $checkStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($projectExists['count'] == 0) {
+                return [
+                    'status' => 'error',
+                    'message' => 'Project with ID ' . $projectMainId . ' does not exist',
+                    'debug' => [
+                        'project_exists' => false,
+                        'project_id' => $projectMainId
+                    ]
+                ];
+            }
+            
+            $stmt = $this->conn->prepare("
+                SELECT 
+                    pm.`project_members_id`, 
+                    pm.`project_users_id`, 
+                    pm.`project_main_id`, 
+                    pm.`project_members_joined_at`, 
+                    pm.`is_active`,
+                    pm.`project_member_rating`,
+                    u.`users_fname` as user_firstname,
+                    u.`users_mname` as user_middlename,
+                    u.`users_lname` as user_lastname,
+                    u.`users_suffix` as user_suffix,
+                    u.`users_email` as user_email,
+                    CONCAT(
+                        u.`users_fname`,
+                        CASE WHEN u.`users_mname` IS NOT NULL AND u.`users_mname` != '' 
+                             THEN CONCAT(' ', LEFT(u.`users_mname`, 1), '.') 
+                             ELSE '' 
+                        END,
+                        ' ',
+                        u.`users_lname`,
+                        CASE WHEN u.`users_suffix` IS NOT NULL AND u.`users_suffix` != '' 
+                             THEN CONCAT(' ', u.`users_suffix`) 
+                             ELSE '' 
+                        END
+                    ) as full_name
+                FROM `tbl_project_members` pm
+                JOIN `tbl_users` u ON pm.`project_users_id` = u.`users_id`
+                WHERE pm.`project_main_id` = :projectMainId
+                AND pm.`is_active` IN (0,1)
+            ");
+            
+            $stmt->bindParam(':projectMainId', $projectMainId, PDO::PARAM_INT);
+            $stmt->execute();
+            
+            $members = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            if (empty($members)) {
+                // If no members found, check if there are any members for this project at all
+                $countStmt = $this->conn->prepare("SELECT COUNT(*) as total FROM `tbl_project_members` WHERE `project_main_id` = :projectMainId");
+                $countStmt->bindParam(':projectMainId', $projectMainId, PDO::PARAM_INT);
+                $countStmt->execute();
+                $countResult = $countStmt->fetch(PDO::FETCH_ASSOC);
+                
+                return [
+                    'status' => 'success',
+                    'data' => [],
+                    'debug' => [
+                        'project_exists' => true,
+                        'members_count' => 0,
+                        'total_members_in_project' => (int)$countResult['total']
+                    ]
+                ];
+            }
+            
+            return [
+                'status' => 'success',
+                'data' => $members,
+                'debug' => [
+                    'project_exists' => true,
+                    'members_count' => count($members)
+                ]
+            ];
+            
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    public function fetchAssignedTaskByProjectMainId($projectMainId) {
+        try {
+            // Get all tasks for the specified project
+            $sql = "
+                SELECT 
+                    pt.`project_task_id`,
+                    pt.`project_project_main_id`,
+                    pt.`project_task_name`,
+                    pt.`project_priority_id`,
+                    pt.`project_assigned_by`,
+                    pt.`project_start_date`,
+                    pt.`project_end_date`,
+                    pt.`project_task_created_at`,
+                    CONCAT(
+                        u.`users_fname`,
+                        ' ',
+                        u.`users_lname`
+                    ) as assigned_by_name
+                FROM `tbl_project_task` pt
+                LEFT JOIN `tbl_users` u ON pt.`project_assigned_by` = u.`users_id`
+                WHERE pt.`project_project_main_id` = :projectMainId
+                ORDER BY pt.`project_task_created_at` DESC
+            ";
+            
+            $taskStmt = $this->conn->prepare($sql);
+            $taskStmt->bindParam(':projectMainId', $projectMainId, PDO::PARAM_INT);
+            $taskStmt->execute();
+            $tasks = $taskStmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            if (empty($tasks)) {
+                return [
+                    'status' => 'success',
+                    'data' => [],
+                    'message' => 'No tasks found for this project'
+                ];
+            }
+            
+            // Prepare statement to fetch assigned users per task
+            $assignedSql = "
+                SELECT 
+                    pa.`project_assigned_id`,
+                    pa.`project_user_id`,
+                    CONCAT(
+                        u.`users_fname`,
+                        ' ',
+                        u.`users_lname`
+                    ) as user_name
+                FROM `tbl_project_assigned` pa
+                LEFT JOIN `tbl_users` u ON pa.`project_user_id` = u.`users_id`
+                WHERE pa.`project_task_id` = :taskId
+            ";
+            $assignedStmt = $this->conn->prepare($assignedSql);
+
+            $result = [];
+            foreach ($tasks as $task) {
+                $taskId = $task['project_task_id'];
+                $assignedStmt->execute([':taskId' => $taskId]);
+                $assignedUsers = $assignedStmt->fetchAll(PDO::FETCH_ASSOC);
+                $task['assigned_users'] = $assignedUsers;
+                $result[] = $task;
+            }
+
+            return [
+                'status' => 'success',
+                'data' => $result
+            ];
+            
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
 }
 
 // Handle the request
@@ -1130,6 +1674,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode($result);
             break;
             
+        case 'fetchAssignedTaskByProjectMainId':
+            if (empty($payload['project_main_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Project Main ID is required']);
+                exit;
+            }
+            
+            $projectMainId = $payload['project_main_id'];
+            $result = $teacher->fetchAssignedTaskByProjectMainId($projectMainId);
+            echo json_encode($result);
+            break;
+            
         case 'uploadPhaseFile':
             // Handle JSON-based file upload with base64 encoded content
             if (empty($payload['phase_project_id']) || empty($payload['user_id']) || empty($payload['file']) || empty($payload['file_name'])) {
@@ -1138,6 +1693,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             
             $result = $teacher->uploadPhaseFileFromJson($payload);
+            echo json_encode($result);
+            break;
+            
+        case 'updateFileRevise':
+            // Validate required fields
+            if (empty($payload['revision_phase_id']) || empty($payload['revised_file'])) {
+                echo json_encode([
+                    'status' => 'error', 
+                    'message' => 'Missing required fields: revision_phase_id and revised_file are required'
+                ]);
+                exit;
+            }
+            
+            $result = $teacher->updateFIleRevise($payload);
+            echo json_encode($result);
+            break;
+            
+        case 'fetchPriorities':
+            $result = $teacher->fetchPriorities();
             echo json_encode($result);
             break;
             
@@ -1220,6 +1794,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = $teacher->saveJoinedWorkspace($payload);
             echo json_encode($result);
             break;
+        
+        case 'insertInvitedStudent':
+            if (empty($payload['student_user_id']) || empty($payload['student_project_master_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'student_user_id and student_project_master_id are required']);
+                exit;
+            }
+            $result = $teacher->insertInvitedStudent($payload);
+            echo json_encode($result);
+            break;
+        
+        case 'insertJoined':
+            if (empty($payload['student_user_id']) || empty($payload['student_project_master_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'student_user_id and student_project_master_id are required']);
+                exit;
+            }
+            $result = $teacher->insertJoined($payload);
+            echo json_encode($result);
+            break;
             
         case 'fetchAnnouncements':
             if (empty($payload['project_master_id'])) {
@@ -1235,7 +1827,75 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = $teacher->fetchStudents($excludeUserId);
             echo json_encode($result);
             break;
+        
+        case 'fetchStudentByMasterId':
+            if (empty($payload['project_master_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Project Master ID is required']);
+                exit;
+            }
+            $result = $teacher->fetchStudentByMasterId($payload['project_master_id']);
+            echo json_encode($result);
+            break;
             
+        case 'fetchMembersByMainId':
+            if (empty($payload['project_main_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Project Main ID is required']);
+                exit;
+            }
+            $result = $teacher->fetchMembersByMainId($payload['project_main_id']);
+            echo json_encode($result);
+            break;
+            
+        case 'insertTask':
+            $requiredFields = ['project_project_main_id', 'project_task_name', 'project_assigned_by'];
+            foreach ($requiredFields as $field) {
+                if (empty($payload[$field])) {
+                    echo json_encode(['status' => 'error', 'message' => ucfirst(str_replace('_', ' ', $field)) . ' is required']);
+                    exit;
+                }
+            }
+            $result = $teacher->insertTask($payload);
+            echo json_encode($result);
+            break;
+            
+        case 'updateMemberRating':
+            // Validate required fields
+            $requiredFields = ['project_users_id', 'project_main_id', 'rating'];
+            foreach ($requiredFields as $field) {
+                if (!isset($payload[$field]) || $payload[$field] === '') {
+                    echo json_encode(['status' => 'error', 'message' => ucfirst(str_replace('_', ' ', $field)) . ' is required']);
+                    exit;
+                }
+            }
+            
+            $result = $teacher->updateMemberRating(
+                $payload['project_users_id'],
+                $payload['project_main_id'],
+                $payload['rating']
+            );
+            echo json_encode($result);
+            break;
+
+        case 'updateCollaborator':
+            if (empty($payload['project_members_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'project_members_id is required']);
+                exit;
+            }
+            // accepted can be boolean true/false or 1/0 or strings 'accept'/'decline'
+            $accepted = null;
+            if (isset($payload['accepted'])) {
+                $accepted = filter_var($payload['accepted'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            } elseif (isset($payload['action'])) {
+                $accepted = strtolower($payload['action']) === 'accept';
+            }
+            if ($accepted === null) {
+                echo json_encode(['status' => 'error', 'message' => 'accepted boolean (or action accept/decline) is required']);
+                exit;
+            }
+            $result = $teacher->updateCollaboratorStatus($payload['project_members_id'], $accepted);
+            echo json_encode($result);
+            break;
+
         default:
             echo json_encode(['status' => 'error', 'message' => 'Invalid operation']);
             break;
