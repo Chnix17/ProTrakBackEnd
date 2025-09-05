@@ -116,9 +116,13 @@ class Teacher {
                 return json_encode(['status' => 'error', 'message' => 'Both school_year_id and teacher_id must be provided and greater than 0']);
             }
 
-            $sql = "SELECT `project_master_id`, `project_title`, `project_description`, `project_code`, `project_teacher_id`, `project_is_active`, `project_school_year_id`
-                    FROM `tbl_project_master`
-                    WHERE `project_school_year_id` = :sid AND `project_teacher_id` = :tid";
+            $sql = "SELECT pm.`project_master_id`, pm.`project_title`, pm.`project_description`, 
+                           pm.`project_code`, pm.`project_teacher_id`, pm.`project_is_active`, 
+                           pm.`project_school_year_id`, sy.`school_year_start_date`, sy.`school_year_end_date`,
+                           sy.`school_year_name`, sy.`school_year_semester_id`
+                    FROM `tbl_project_master` pm
+                    INNER JOIN `tbl_school_year` sy ON pm.`project_school_year_id` = sy.`school_year_id`
+                    WHERE pm.`project_school_year_id` = :sid AND pm.`project_teacher_id` = :tid";
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([
                 ':sid' => $schoolYearId,
