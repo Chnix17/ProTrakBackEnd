@@ -546,6 +546,7 @@ class Teacher {
                              WHEN s.phase_project_status_status_id = 3 THEN 'Under Review'
                              WHEN s.phase_project_status_status_id = 4 THEN 'Revision Nedded'
                              WHEN s.phase_project_status_status_id = 5 THEN 'Approved'
+                             WHEN s.phase_project_status_status_id = 7 THEN 'Failed'
                              ELSE 'Pending'
                          END as status_name
                          FROM tbl_phase_project_status s
@@ -593,6 +594,7 @@ class Teacher {
                                    WHEN s.phase_project_status_status_id = 3 THEN 'Under Review'
                                    WHEN s.phase_project_status_status_id = 4 THEN 'Revision Nedded'
                                    WHEN s.phase_project_status_status_id = 5 THEN 'Approved'
+                                   WHEN s.phase_project_status_status_id = 7 THEN 'Failed'
                                    ELSE 'Pending'
                                END as status_name,
                                u.users_fname, u.users_mname, u.users_lname
@@ -696,6 +698,41 @@ class Teacher {
                 throw new Exception('This phase has already been started');
             }
             
+            // Check current project status
+            $projectStatusSql = "SELECT project_status_status_id FROM tbl_project_status 
+                               WHERE project_status_project_main_id = :project_main_id 
+                               ORDER BY project_status_created_at DESC LIMIT 1";
+            
+            $projectStatusStmt = $this->conn->prepare($projectStatusSql);
+            $projectStatusStmt->bindParam(':project_main_id', $data['project_main_id'], PDO::PARAM_INT);
+            $projectStatusStmt->execute();
+            
+            $currentStatus = $projectStatusStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // If project status is 8 (not started), insert status 1 if it doesn't exist
+            if ($currentStatus && $currentStatus['project_status_status_id'] == 8) {
+                // Check if status 1 already exists for this project
+                $checkStatus1Sql = "SELECT project_status_id FROM tbl_project_status 
+                                  WHERE project_status_project_main_id = :project_main_id 
+                                  AND project_status_status_id = 1";
+                
+                $checkStatus1Stmt = $this->conn->prepare($checkStatus1Sql);
+                $checkStatus1Stmt->bindParam(':project_main_id', $data['project_main_id'], PDO::PARAM_INT);
+                $checkStatus1Stmt->execute();
+                
+                // If status 1 doesn't exist, insert it
+                if ($checkStatus1Stmt->rowCount() == 0) {
+                    $insertStatus1Sql = "INSERT INTO tbl_project_status 
+                                        (project_status_project_main_id, project_status_status_id, project_status_updated_by, project_status_created_at) 
+                                        VALUES (:project_main_id, 1, :updated_by, NOW())";
+                    
+                    $insertStatus1Stmt = $this->conn->prepare($insertStatus1Sql);
+                    $insertStatus1Stmt->bindParam(':project_main_id', $data['project_main_id'], PDO::PARAM_INT);
+                    $insertStatus1Stmt->bindParam(':updated_by', $data['created_by'], PDO::PARAM_INT);
+                    $insertStatus1Stmt->execute();
+                }
+            }
+            
             // Insert into tbl_phase_project
             $phaseProjectSql = "INSERT INTO tbl_phase_project 
                               (phase_project_phase_id, phase_project_main_id, phase_project_created_at, phase_created_by) 
@@ -743,11 +780,25 @@ class Teacher {
     
     public function fetchProjectMainById($projectMainId) {
         try {
-            // Fetch project main details
-            $projectSql = "SELECT `project_main_id`, `project_title`, `project_main_master_id`, `project_description`, 
-                                  `project_created_by_user_id`, `project_is_active` 
-                           FROM `tbl_project_main` 
-                           WHERE `project_main_id` = :project_main_id";
+            // Fetch project main details with latest status and status name
+            $projectSql = "SELECT pm.`project_main_id`, pm.`project_title`, pm.`project_main_master_id`, 
+                                  pm.`project_description`, pm.`project_created_by_user_id`, pm.`project_is_active`,
+                                  ps.`project_status_id`, ps.`project_status_status_id`, 
+                                  ps.`project_status_updated_by`, ps.`project_status_created_at`,
+                                  sm.`status_master_name`
+                           FROM `tbl_project_main` pm
+                           LEFT JOIN (
+                               SELECT ps1.*
+                               FROM tbl_project_status ps1
+                               INNER JOIN (
+                                   SELECT project_status_project_main_id, MAX(project_status_created_at) as max_created_at
+                                   FROM tbl_project_status
+                                   GROUP BY project_status_project_main_id
+                               ) ps2 ON ps1.project_status_project_main_id = ps2.project_status_project_main_id 
+                                   AND ps1.project_status_created_at = ps2.max_created_at
+                           ) ps ON pm.project_main_id = ps.project_status_project_main_id
+                           LEFT JOIN `tbl_status_master` sm ON ps.`project_status_status_id` = sm.`status_master_id`
+                           WHERE pm.`project_main_id` = :project_main_id";
             
             $stmt = $this->conn->prepare($projectSql);
             $stmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
@@ -758,33 +809,42 @@ class Teacher {
                 return ['status' => 'error', 'message' => 'Project not found'];
             }
             
-            // Fetch all phases for this project
+            // Fetch all phases for this project with latest status
             $phasesSql = "SELECT pm.`phase_main_id`, pm.`phase_main_name`, pm.`phase_main_description`,
                                  pm.`phase_start_date`, pm.`phase_end_date`,
-                                 IF(pp.`phase_project_id` IS NOT NULL, 1, 0) as is_started
+                                 pp.`phase_project_id`,
+                                 CASE 
+                                     WHEN s.phase_project_status_status_id = 1 THEN 'In Progress'
+                                     WHEN s.phase_project_status_status_id = 2 THEN 'Completed'
+                                     WHEN s.phase_project_status_status_id = 3 THEN 'Under Review'
+                                     WHEN s.phase_project_status_status_id = 4 THEN 'Revision Nedded'
+                                     WHEN s.phase_project_status_status_id = 5 THEN 'Approved'
+                                     WHEN s.phase_project_status_status_id = 7 THEN 'Failed'
+                                     ELSE 'Not Started'
+                                 END as status,
+                                 s.phase_project_status_status_id,
+                                 s.phase_project_status_created_at
                           FROM `tbl_phase_main` pm
                           LEFT JOIN `tbl_phase_project` pp ON pm.`phase_main_id` = pp.`phase_project_phase_id` 
                               AND pp.`phase_project_main_id` = :project_main_id
-                          WHERE pm.`phase_project_master_id` = :project_master_id";
+                          LEFT JOIN (
+                              SELECT s1.*
+                              FROM tbl_phase_project_status s1
+                              INNER JOIN (
+                                  SELECT phase_project_id, MAX(phase_project_status_created_at) as max_created_at
+                                  FROM tbl_phase_project_status
+                                  GROUP BY phase_project_id
+                              ) s2 ON s1.phase_project_id = s2.phase_project_id 
+                                  AND s1.phase_project_status_created_at = s2.max_created_at
+                          ) s ON pp.phase_project_id = s.phase_project_id
+                          WHERE pm.`phase_project_master_id` = :project_master_id
+                          ORDER BY pm.phase_main_id";
             
             $stmt = $this->conn->prepare($phasesSql);
             $stmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
             $stmt->bindParam(':project_master_id', $project['project_main_master_id'], PDO::PARAM_INT);
             $stmt->execute();
             $phases = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            
-            // Add phase status
-            $currentDate = date('Y-m-d');
-            foreach ($phases as &$phase) {
-                $phase['status'] = 'Not Started';
-                if ($phase['is_started']) {
-                    $phase['status'] = 'In Progress';
-                    if ($phase['phase_end_date'] < $currentDate) {
-                        $phase['status'] = 'Completed';
-                    }
-                }
-                unset($phase['is_started']);
-            }
             
             $project['phases'] = $phases;
             
@@ -1228,6 +1288,18 @@ class Teacher {
             // Get the ID of the newly created project
             $projectMainId = $this->conn->lastInsertId();
             
+            // Insert project status with status ID 8
+            $statusSql = "INSERT INTO tbl_project_status 
+                         (project_status_project_main_id, project_status_status_id, project_status_updated_by) 
+                         VALUES (:project_main_id, :status_id, :updated_by)";
+            
+            $statusStmt = $this->conn->prepare($statusSql);
+            $statusStmt->execute([
+                ':project_main_id' => $projectMainId,
+                ':status_id' => 8,
+                ':updated_by' => $data['project_created_by_user_id']
+            ]);
+            
             // Insert the creator as a project member
             $sql = "INSERT INTO `tbl_project_members` 
                     (`project_main_id`, `project_users_id`, `is_active`)
@@ -1524,6 +1596,51 @@ class Teacher {
         }
     }
 
+    public function updateAssignedTask($taskId) {
+        try {
+            // Check if task exists
+            $checkSql = "SELECT `project_task_id` FROM `tbl_project_task` WHERE `project_task_id` = :taskId";
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->bindParam(':taskId', $taskId, PDO::PARAM_INT);
+            $checkStmt->execute();
+            
+            if ($checkStmt->rowCount() === 0) {
+                return [
+                    'status' => 'error',
+                    'message' => 'Task not found'
+                ];
+            }
+            
+            // Always update project_task_is_done to 1
+            $updateSql = "UPDATE `tbl_project_task` SET `project_task_is_done` = 1 WHERE `project_task_id` = :taskId";
+            $updateStmt = $this->conn->prepare($updateSql);
+            $updateStmt->bindParam(':taskId', $taskId, PDO::PARAM_INT);
+            
+            
+            $updateStmt->execute();
+            
+            if ($updateStmt->rowCount() > 0) {
+                return [
+                    'status' => 'success',
+                    'message' => 'Task updated successfully',
+                    'affected_rows' => $updateStmt->rowCount()
+                ];
+            } else {
+                return [
+                    'status' => 'success',
+                    'message' => 'No changes were made to the task',
+                    'affected_rows' => 0
+                ];
+            }
+            
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+    
     public function fetchAssignedTaskByProjectMainId($projectMainId) {
         try {
             // Get all tasks for the specified project
@@ -1537,6 +1654,7 @@ class Teacher {
                     pt.`project_start_date`,
                     pt.`project_end_date`,
                     pt.`project_task_created_at`,
+                    pt.`project_task_is_done`,
                     CONCAT(
                         u.`users_fname`,
                         ' ',
@@ -1629,6 +1747,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
             $result = $teacher->findProjectMasterByCode($payload['project_code']);
+            echo json_encode($result);
+            break;
+
+        case 'updateAssignedTask':
+            if (empty($payload['task_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'Task ID is required']);
+                exit;
+            }
+            $result = $teacher->updateAssignedTask($payload['task_id']);
             echo json_encode($result);
             break;
             

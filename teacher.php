@@ -28,9 +28,23 @@ class Teacher {
                         pm.project_is_active,
                         u.users_fname,
                         u.users_lname,
+                        ps.project_status_status_id,
+                        sm.status_master_name,
+                        ps.project_status_created_at as status_created_at,
                         (SELECT COUNT(*) FROM tbl_project_members WHERE project_main_id = pm.project_main_id) as member_count
                     FROM tbl_project_main pm
                     LEFT JOIN tbl_users u ON pm.project_created_by_user_id = u.users_id
+                    LEFT JOIN (
+                        SELECT ps1.project_status_project_main_id, ps1.project_status_status_id, ps1.project_status_created_at
+                        FROM tbl_project_status ps1
+                        INNER JOIN (
+                            SELECT project_status_project_main_id, MAX(project_status_created_at) as max_created_at
+                            FROM tbl_project_status
+                            GROUP BY project_status_project_main_id
+                        ) ps2 ON ps1.project_status_project_main_id = ps2.project_status_project_main_id 
+                        AND ps1.project_status_created_at = ps2.max_created_at
+                    ) ps ON pm.project_main_id = ps.project_status_project_main_id
+                    LEFT JOIN tbl_status_master sm ON ps.project_status_status_id = sm.status_master_id
                     WHERE pm.project_main_master_id = :masterId";
             
             $stmt = $this->conn->prepare($sql);
@@ -47,7 +61,10 @@ class Teacher {
                     'project_created_by_user_id' => $row['project_created_by_user_id'],
                     'creator_name' => $row['users_fname'] . ' ' . $row['users_lname'],
                     'project_is_active' => $row['project_is_active'],
-                    'member_count' => (int)$row['member_count']
+                    'member_count' => (int)$row['member_count'],
+                    'status_id' => $row['project_status_status_id'],
+                    'status_name' => $row['status_master_name'],
+                    'status_created_at' => $row['status_created_at']
                 ];
             }
             
