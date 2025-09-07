@@ -681,6 +681,216 @@ class Teacher {
             ]);
         }
     }
+
+    // Count all project masters based on project_Teacher_id
+    public function countProjectMastersByTeacher($teacherId) {
+        try {
+            $teacherId = (int)$teacherId;
+            if ($teacherId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'teacher_id must be provided and greater than 0']);
+            }
+
+            $sql = "SELECT COUNT(*) as total_project_masters
+                    FROM `tbl_project_master` 
+                    WHERE `project_teacher_id` = :teacher_id";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([':teacher_id' => $teacherId]);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            return json_encode([
+                'status' => 'success',
+                'data' => [
+                    'teacher_id' => $teacherId,
+                    'total_project_masters' => (int)$result['total_project_masters']
+                ]
+            ]);
+            
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Failed to count project masters: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    // Count total projects in all project masters for a specific teacher
+    public function countAllProjectsByTeacher($teacherId) {
+        try {
+            $teacherId = (int)$teacherId;
+            if ($teacherId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'teacher_id must be provided and greater than 0']);
+            }
+
+            $sql = "SELECT COUNT(pm.project_main_id) as total_projects
+                    FROM `tbl_project_main` pm
+                    INNER JOIN `tbl_project_master` pmaster ON pm.project_main_master_id = pmaster.project_master_id
+                    WHERE pmaster.project_teacher_id = :teacher_id";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([':teacher_id' => $teacherId]);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            return json_encode([
+                'status' => 'success',
+                'data' => [
+                    'teacher_id' => $teacherId,
+                    'total_projects' => (int)$result['total_projects']
+                ]
+            ]);
+            
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Failed to count total projects: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    // Count project masters by teacher with additional filtering options
+    public function countProjectMastersByTeacherWithFilters($teacherId, $schoolYearId = null, $isActive = null) {
+        try {
+            $teacherId = (int)$teacherId;
+            if ($teacherId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'teacher_id must be provided and greater than 0']);
+            }
+
+            $sql = "SELECT COUNT(*) as total_project_masters
+                    FROM `tbl_project_master` pm";
+            
+            $conditions = ["pm.project_teacher_id = :teacher_id"];
+            $params = [':teacher_id' => $teacherId];
+
+            if ($schoolYearId !== null) {
+                $schoolYearId = (int)$schoolYearId;
+                if ($schoolYearId > 0) {
+                    $conditions[] = "pm.project_school_year_id = :school_year_id";
+                    $params[':school_year_id'] = $schoolYearId;
+                }
+            }
+
+            if ($isActive !== null) {
+                $isActive = (int)$isActive;
+                $conditions[] = "pm.project_is_active = :is_active";
+                $params[':is_active'] = $isActive;
+            }
+
+            $sql .= " WHERE " . implode(" AND ", $conditions);
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute($params);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            return json_encode([
+                'status' => 'success',
+                'data' => [
+                    'teacher_id' => $teacherId,
+                    'school_year_id' => $schoolYearId,
+                    'is_active' => $isActive,
+                    'total_project_masters' => (int)$result['total_project_masters']
+                ]
+            ]);
+            
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Failed to count project masters with filters: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    // Fetch recent projects from project main based on created_at and master project
+    public function fetchRecentProjects($teacherId, $limit = 10) {
+        try {
+            $teacherId = (int)$teacherId;
+            $limit = (int)$limit;
+            
+            if ($teacherId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'teacher_id must be provided and greater than 0']);
+            }
+
+            if ($limit <= 0 || $limit > 50) {
+                $limit = 10; // Default limit
+            }
+
+            $sql = "SELECT 
+                        pm.project_main_id,
+                        pm.project_title,
+                        pm.project_description,
+                        pm.project_main_master_id,
+                        pm.project_created_by_user_id,
+                        pm.project_is_active,
+                        pm.project_created_at,
+                        pmaster.project_title as master_project_title,
+                        pmaster.project_code as master_project_code,
+                        pmaster.project_description as master_project_description,
+                        u.users_fname,
+                        u.users_lname,
+                        ps.project_status_status_id,
+                        sm.status_master_name,
+                        ps.project_status_created_at as status_created_at,
+                        (SELECT COUNT(*) FROM tbl_project_members WHERE project_main_id = pm.project_main_id) as member_count
+                    FROM tbl_project_main pm
+                    INNER JOIN tbl_project_master pmaster ON pm.project_main_master_id = pmaster.project_master_id
+                    LEFT JOIN tbl_users u ON pm.project_created_by_user_id = u.users_id
+                    LEFT JOIN (
+                        SELECT ps1.project_status_project_main_id, ps1.project_status_status_id, ps1.project_status_created_at
+                        FROM tbl_project_status ps1
+                        INNER JOIN (
+                            SELECT project_status_project_main_id, MAX(project_status_created_at) as max_created_at
+                            FROM tbl_project_status
+                            GROUP BY project_status_project_main_id
+                        ) ps2 ON ps1.project_status_project_main_id = ps2.project_status_project_main_id 
+                        AND ps1.project_status_created_at = ps2.max_created_at
+                    ) ps ON pm.project_main_id = ps.project_status_project_main_id
+                    LEFT JOIN tbl_status_master sm ON ps.project_status_status_id = sm.status_master_id
+                    WHERE pmaster.project_teacher_id = :teacher_id
+                    ORDER BY pm.project_created_at DESC
+                    LIMIT :limit";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':teacher_id', $teacherId, PDO::PARAM_INT);
+            $stmt->bindParam(':limit', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+            
+            $projects = [];
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $projects[] = [
+                    'project_main_id' => (int)$row['project_main_id'],
+                    'project_title' => $row['project_title'],
+                    'project_description' => $row['project_description'],
+                    'project_main_master_id' => (int)$row['project_main_master_id'],
+                    'project_created_by_user_id' => (int)$row['project_created_by_user_id'],
+                    'creator_name' => trim($row['users_fname'] . ' ' . $row['users_lname']),
+                    'project_is_active' => (int)$row['project_is_active'],
+                    'project_created_at' => $row['project_created_at'],
+                    'member_count' => (int)$row['member_count'],
+                    'status_id' => $row['project_status_status_id'],
+                    'status_name' => $row['status_master_name'],
+                    'status_created_at' => $row['status_created_at'],
+                    'master_project' => [
+                        'title' => $row['master_project_title'],
+                        'code' => $row['master_project_code'],
+                        'description' => $row['master_project_description']
+                    ]
+                ];
+            }
+            
+            return json_encode([
+                'status' => 'success',
+                'data' => $projects,
+                'count' => count($projects),
+                'teacher_id' => $teacherId,
+                'limit' => $limit
+            ]);
+            
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Failed to fetch recent projects: ' . $e->getMessage()
+            ]);
+        }
+    }
 }
 
 // Handle the request
@@ -761,6 +971,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         case 'insertTask':
             echo $teacher->insertTask($payload);
             break;
+            
+        case 'countProjectMastersByTeacher':
+            $teacherId = $payload['teacher_id'] ?? $payload['project_teacher_id'] ?? 0;
+            echo $teacher->countProjectMastersByTeacher($teacherId);
+            break;
+            
+        case 'countAllProjectsByTeacher':
+            $teacherId = $payload['teacher_id'] ?? $payload['project_teacher_id'] ?? 0;
+            echo $teacher->countAllProjectsByTeacher($teacherId);
+            break;
+            
+        case 'countProjectMastersByTeacherWithFilters':
+            $teacherId = $payload['teacher_id'] ?? $payload['project_teacher_id'] ?? 0;
+            $schoolYearId = $payload['school_year_id'] ?? $payload['project_school_year_id'] ?? null;
+            $isActive = isset($payload['is_active']) ? $payload['is_active'] : (isset($payload['project_is_active']) ? $payload['project_is_active'] : null);
+            echo $teacher->countProjectMastersByTeacherWithFilters($teacherId, $schoolYearId, $isActive);
+            break;
+            
+        case 'fetchRecentProjects':
+            $teacherId = $payload['teacher_id'] ?? $payload['project_teacher_id'] ?? 0;
+            $limit = $payload['limit'] ?? 10;
+            echo $teacher->fetchRecentProjects($teacherId, $limit);
+            break;
+            
         default:
             echo json_encode(['status' => 'error', 'message' => 'Invalid operation']);
             break;

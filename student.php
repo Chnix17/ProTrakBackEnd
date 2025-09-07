@@ -497,35 +497,39 @@ class Teacher {
         }
     }
     
-    public function fetchPhasesProjectDetailById($phaseMainId) {
+    public function fetchPhasesProjectDetailById($phaseMainId, $projectMainId) {
         try {
-            // First, get the phase_project_id using phase_project_phase_id
+            // First, get the phase_project_id using both phase_main_id and project_main_id
             $idSql = "SELECT phase_project_id, phase_project_main_id 
                      FROM tbl_phase_project 
                      WHERE phase_project_phase_id = :phase_main_id 
+                     AND phase_project_main_id = :project_main_id
                      LIMIT 1";
             
             $stmt = $this->conn->prepare($idSql);
             $stmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
+            $stmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
             $stmt->execute();
             $phaseIds = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if (!$phaseIds) {
                 return [
                     'status' => 'error',
-                    'message' => 'No phase project found for the given phase_main_id'
+                    'message' => 'No phase project found for the given phase_main_id and project_main_id'
                 ];
             }
             
             $phaseProjectId = $phaseIds['phase_project_id'];
             $phaseProjectMainId = $phaseIds['phase_project_main_id'];
 
-            // Then fetch the full phase project details
+            // Then fetch the full phase project details with project main info
             $phaseSql = "SELECT pp.*, pm.phase_main_name, pm.phase_main_description,
                                pm.phase_start_date, pm.phase_end_date,
+                               prm.project_main_id, prm.project_title, prm.project_description,
                                u.users_fname, u.users_mname, u.users_lname
                         FROM tbl_phase_project pp
                         JOIN tbl_phase_main pm ON pp.phase_project_phase_id = pm.phase_main_id
+                        JOIN tbl_project_main prm ON pp.phase_project_main_id = prm.project_main_id
                         LEFT JOIN tbl_users u ON pp.phase_created_by = u.users_id
                         WHERE pp.phase_project_id = :phase_project_id";
             
@@ -552,41 +556,51 @@ class Teacher {
                          FROM tbl_phase_project_status s
                          JOIN tbl_phase_project pp ON s.phase_project_id = pp.phase_project_id
                          WHERE pp.phase_project_phase_id = :phase_main_id
+                         AND pp.phase_project_main_id = :project_main_id
                          ORDER BY s.phase_project_status_created_at DESC
                          LIMIT 1";
             
             $statusStmt = $this->conn->prepare($statusSql);
             $statusStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
+            $statusStmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
             $statusStmt->execute();
             $status = $statusStmt->fetch(PDO::FETCH_ASSOC);
             
-            // Fetch discussions with user info
-            $discussionSql = "SELECT d.*, u.users_fname, u.users_mname, u.users_lname
+            // Fetch discussions with user info and project main details - filtered by both IDs
+            $discussionSql = "SELECT d.*, u.users_fname, u.users_mname, u.users_lname,
+                                    prm.project_main_id, prm.project_title, prm.project_description,
+                                    pm.phase_main_name, pm.phase_main_description
                              FROM tbl_phase_discussion d
                              LEFT JOIN tbl_users u ON d.phase_discussion_user_id = u.users_id
                              JOIN tbl_phase_project pp ON d.phase_discussion_phase_project_id = pp.phase_project_id
-                         WHERE pp.phase_project_phase_id = :phase_main_id
+                             JOIN tbl_project_main prm ON pp.phase_project_main_id = prm.project_main_id
+                             JOIN tbl_phase_main pm ON pp.phase_project_phase_id = pm.phase_main_id
+                             WHERE pp.phase_project_phase_id = :phase_main_id
+                             AND pp.phase_project_main_id = :project_main_id
                              ORDER BY d.phase_discussion_created_at DESC";
             
             $discussionStmt = $this->conn->prepare($discussionSql);
             $discussionStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
+            $discussionStmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
             $discussionStmt->execute();
             $discussions = $discussionStmt->fetchAll(PDO::FETCH_ASSOC);
             
-            // Fetch files with uploader info
+            // Fetch files with uploader info - filtered by both IDs
             $filesSql = "SELECT f.*, u.users_fname, u.users_mname, u.users_lname
                         FROM tbl_phase_project_files f
                         LEFT JOIN tbl_users u ON f.phase_file_created_by = u.users_id
                         JOIN tbl_phase_project pp ON f.phase_project_id = pp.phase_project_id
                         WHERE pp.phase_project_phase_id = :phase_main_id
+                        AND pp.phase_project_main_id = :project_main_id
                         ORDER BY f.phase_file_created_at DESC";
             
             $filesStmt = $this->conn->prepare($filesSql);
             $filesStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
+            $filesStmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
             $filesStmt->execute();
             $files = $filesStmt->fetchAll(PDO::FETCH_ASSOC);
             
-            // Fetch status history
+            // Fetch status history - filtered by both IDs
             $statusHistorySql = "SELECT s.*, 
                                CASE 
                                    WHEN s.phase_project_status_status_id = 1 THEN 'In Progress'
@@ -602,10 +616,12 @@ class Teacher {
                                LEFT JOIN tbl_users u ON s.phase_project_status_created_by = u.users_id
                                JOIN tbl_phase_project pp ON s.phase_project_id = pp.phase_project_id
                                WHERE pp.phase_project_phase_id = :phase_main_id
+                               AND pp.phase_project_main_id = :project_main_id
                                ORDER BY s.phase_project_status_created_at DESC";
             
             $statusHistoryStmt = $this->conn->prepare($statusHistorySql);
             $statusHistoryStmt->bindParam(':phase_main_id', $phaseMainId, PDO::PARAM_INT);
+            $statusHistoryStmt->bindParam(':project_main_id', $projectMainId, PDO::PARAM_INT);
             $statusHistoryStmt->execute();
             $statusHistory = $statusHistoryStmt->fetchAll(PDO::FETCH_ASSOC);
             
@@ -617,7 +633,8 @@ class Teacher {
                     'current_status' => $status,
                     'status_history' => $statusHistory,
                     'discussions' => $discussions,
-                    'files' => $files
+                    'files' => $files,
+                    'project_main_id' => $phaseProjectMainId
                 ]
             ];
             
@@ -1081,6 +1098,75 @@ class Teacher {
             return [
                 'status' => 'error',
                 'message' => 'Error fetching projects: ' . $e->getMessage()
+            ];
+        }
+    }
+    
+    public function fetchMyActiveProjects($userId) {
+        try {
+            $sql = "SELECT 
+                        pm.project_main_id,
+                        pm.project_title,
+                        pm.project_description,
+                        pm.project_main_master_id,
+                        pm.project_created_by_user_id,
+                        pm.project_is_active,
+                        pm.project_created_at,
+                        u.users_fname,
+                        u.users_lname,
+                        ps.project_status_status_id,
+                        sm.status_master_name,
+                        ps.project_status_created_at as status_created_at,
+                        (SELECT COUNT(*) FROM tbl_project_members WHERE project_main_id = pm.project_main_id) as member_count
+                    FROM tbl_project_main pm
+                    LEFT JOIN tbl_users u ON pm.project_created_by_user_id = u.users_id
+                    LEFT JOIN (
+                        SELECT ps1.project_status_project_main_id, ps1.project_status_status_id, ps1.project_status_created_at
+                        FROM tbl_project_status ps1
+                        INNER JOIN (
+                            SELECT project_status_project_main_id, MAX(project_status_created_at) as max_created_at
+                            FROM tbl_project_status
+                            GROUP BY project_status_project_main_id
+                        ) ps2 ON ps1.project_status_project_main_id = ps2.project_status_project_main_id 
+                        AND ps1.project_status_created_at = ps2.max_created_at
+                    ) ps ON pm.project_main_id = ps.project_status_project_main_id
+                    LEFT JOIN tbl_status_master sm ON ps.project_status_status_id = sm.status_master_id
+                    WHERE pm.project_created_by_user_id = :user_id 
+                    AND pm.project_is_active = 1
+                    ORDER BY pm.project_created_at DESC";
+            
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':user_id', $userId, PDO::PARAM_INT);
+            $stmt->execute();
+            
+            $projects = [];
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $projects[] = [
+                    'project_main_id' => $row['project_main_id'],
+                    'project_title' => $row['project_title'],
+                    'project_description' => $row['project_description'],
+                    'project_main_master_id' => $row['project_main_master_id'],
+                    'project_created_by_user_id' => $row['project_created_by_user_id'],
+                    'creator_name' => $row['users_fname'] . ' ' . $row['users_lname'],
+                    'project_is_active' => $row['project_is_active'],
+                    'project_created_at' => $row['project_created_at'],
+                    'member_count' => (int)$row['member_count'],
+                    'status_id' => $row['project_status_status_id'],
+                    'status_name' => $row['status_master_name'],
+                    'status_created_at' => $row['status_created_at']
+                ];
+            }
+            
+            return [
+                'status' => 'success',
+                'data' => $projects,
+                'count' => count($projects)
+            ];
+            
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Error fetching my active projects: ' . $e->getMessage()
             ];
         }
     }
@@ -1768,6 +1854,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode($result);
             break;
             
+        case 'fetchMyActiveProjects':
+            if (empty($payload['user_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'User ID is required']);
+                exit;
+            }
+            $result = $teacher->fetchMyActiveProjects($payload['user_id']);
+            echo json_encode($result);
+            break;
+            
         case 'fetchProjectMainById':
             if (empty($payload['project_main_id'])) {
                 echo json_encode(['status' => 'error', 'message' => 'Project Main ID is required']);
@@ -1842,34 +1937,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode($result);
             break;
             
-        case 'fetchPhasesProjectDetail':
-            // Debug: Log the received payload
-            error_log('Received payload: ' . print_r($payload, true));
-            
-            // Handle both payload formats
-            $phaseMainId = null;
-            if (isset($payload['payload']['phase_main_id'])) {
-                // Format: {"operation":"...", "payload":{"phase_main_id":3}}
-                $phaseMainId = $payload['payload']['phase_main_id'];
-            } elseif (isset($payload['phase_main_id'])) {
-                // Format: {"operation":"...", "phase_main_id":3}
-                $phaseMainId = $payload['phase_main_id'];
-            }
-            
-            if (empty($phaseMainId)) {
-                error_log('Missing phase_main_id in payload');
-                echo json_encode([
-                    'status' => 'error', 
-                    'message' => 'Phase Main ID is required',
-                    'received_payload' => $payload,
-                    'hint' => 'Please provide phase_main_id in the payload'
-                ]);
-                exit;
-            }
-            
-            $result = $teacher->fetchPhasesProjectDetailById($phaseMainId);
-            echo json_encode($result);
-            break;
+            case 'fetchPhasesProjectDetail':
+                // Debug: Log the received payload
+                error_log('Received payload: ' . print_r($payload, true));
+                
+                // Handle both payload formats for phase_main_id
+                $phaseMainId = null;
+                if (isset($payload['payload']['phase_main_id'])) {
+                    // Format: {"operation":"...", "payload":{"phase_main_id":3}}
+                    $phaseMainId = $payload['payload']['phase_main_id'];
+                } elseif (isset($payload['phase_main_id'])) {
+                    // Format: {"operation":"...", "phase_main_id":3}
+                    $phaseMainId = $payload['phase_main_id'];
+                }
+                
+                // Handle both payload formats for project_main_id
+                $projectMainId = null;
+                if (isset($payload['payload']['project_main_id'])) {
+                    // Format: {"operation":"...", "payload":{"project_main_id":5}}
+                    $projectMainId = $payload['payload']['project_main_id'];
+                } elseif (isset($payload['project_main_id'])) {
+                    // Format: {"operation":"...", "project_main_id":5}
+                    $projectMainId = $payload['project_main_id'];
+                }
+                
+                // Validate required parameters
+                $errors = [];
+                if (empty($phaseMainId)) {
+                    $errors[] = 'phase_main_id is required';
+                }
+                if (empty($projectMainId)) {
+                    $errors[] = 'project_main_id is required';
+                }
+                
+                if (!empty($errors)) {
+                    error_log('Missing required parameters: ' . implode(', ', $errors));
+                    echo json_encode([
+                        'status' => 'error', 
+                        'message' => 'Missing required parameters: ' . implode(', ', $errors),
+                        'received_payload' => $payload,
+                        'required_parameters' => ['phase_main_id', 'project_main_id'],
+                        'hint' => 'Please provide both phase_main_id and project_main_id in the payload'
+                    ]);
+                    exit;
+                }
+                
+                $result = $teacher->fetchPhasesProjectDetailById($phaseMainId, $projectMainId);
+                echo json_encode($result);
+                break;
             
         case 'fetchJoinedWorkspace':
             if (empty($payload['student_id'])) {
