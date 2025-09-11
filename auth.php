@@ -4,6 +4,11 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 
+// PHPMailer imports
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
+use PHPMailer\PHPMailer\Exception;
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
   http_response_code(200);
   exit;
@@ -318,6 +323,332 @@ class Login {
     //         ]);
     //     }
     // }
+
+    public function insertSignUp($json) {
+        $json = json_decode($json, true);
+        
+        try {
+            // Validate required fields
+            $required_fields = ['users_fname', 'users_lname', 'users_school_id', 'users_password', 'users_email', 'users_user_level_id'];
+            
+            foreach ($required_fields as $field) {
+                if (empty($json[$field])) {
+                    return json_encode([
+                        'status' => 'error', 
+                        'message' => 'Missing required field: ' . str_replace('users_', '', $field)
+                    ]);
+                }
+            }
+
+            // Check if school ID already exists
+            $check_school_id_sql = "SELECT users_school_id FROM tbl_users WHERE users_school_id = :school_id";
+            $stmt = $this->conn->prepare($check_school_id_sql);
+            $stmt->bindParam(':school_id', $json['users_school_id']);
+            $stmt->execute();
+            
+            if ($stmt->rowCount() > 0) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'School ID already exists'
+                ]);
+            }
+
+            // Check if email already exists
+            $check_email_sql = "SELECT users_email FROM tbl_users WHERE users_email = :email";
+            $stmt = $this->conn->prepare($check_email_sql);
+            $stmt->bindParam(':email', $json['users_email']);
+            $stmt->execute();
+            
+            if ($stmt->rowCount() > 0) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Email already exists'
+                ]);
+            }
+
+            // Hash the password
+            $hashed_password = password_hash($json['users_password'], PASSWORD_DEFAULT);
+
+            // Set default values for optional fields
+            $users_title_id = isset($json['users_title_id']) ? $json['users_title_id'] : null;
+            $users_mname = isset($json['users_mname']) ? $json['users_mname'] : '';
+            $users_suffix = isset($json['users_suffix']) ? $json['users_suffix'] : '';
+            $users_is_active = 1; // Default to active
+
+            // Insert new user
+            $insert_sql = "INSERT INTO tbl_users (
+                users_title_id, 
+                users_fname, 
+                users_mname, 
+                users_lname, 
+                users_suffix, 
+                users_school_id, 
+                users_password, 
+                users_email, 
+                users_user_level_id, 
+                users_is_active
+            ) VALUES (
+                :users_title_id,
+                :users_fname,
+                :users_mname,
+                :users_lname,
+                :users_suffix,
+                :users_school_id,
+                :users_password,
+                :users_email,
+                :users_user_level_id,
+                :users_is_active
+            )";
+
+            $stmt = $this->conn->prepare($insert_sql);
+            $stmt->bindParam(':users_title_id', $users_title_id);
+            $stmt->bindParam(':users_fname', $json['users_fname']);
+            $stmt->bindParam(':users_mname', $users_mname);
+            $stmt->bindParam(':users_lname', $json['users_lname']);
+            $stmt->bindParam(':users_suffix', $users_suffix);
+            $stmt->bindParam(':users_school_id', $json['users_school_id']);
+            $stmt->bindParam(':users_password', $hashed_password);
+            $stmt->bindParam(':users_email', $json['users_email']);
+            $stmt->bindParam(':users_user_level_id', $json['users_user_level_id']);
+            $stmt->bindParam(':users_is_active', $users_is_active);
+
+            if ($stmt->execute()) {
+                $new_user_id = $this->conn->lastInsertId();
+                
+                return json_encode([
+                    'status' => 'success',
+                    'message' => 'User registered successfully',
+                    'data' => [
+                        'user_id' => (int)$new_user_id,
+                        'school_id' => $json['users_school_id'],
+                        'email' => $json['users_email']
+                    ]
+                ]);
+            } else {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Failed to register user'
+                ]);
+            }
+
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    public function sendOTP($json) {
+        $json = json_decode($json, true);
+        
+        try {
+            // Validate required field
+            if (empty($json['email'])) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Email is required'
+                ]);
+            }
+
+            $email = $json['email'];
+
+            // Check if email is already verified
+            $check_verified_sql = "SELECT verification_id, is_verified FROM tbl_email_verification WHERE email = :email AND is_verified = 1";
+            $stmt = $this->conn->prepare($check_verified_sql);
+            $stmt->bindParam(':email', $email);
+            $stmt->execute();
+            
+            if ($stmt->rowCount() > 0) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Email has been used'
+                ]);
+            }
+
+            // Generate 6-digit OTP
+            $otp_code = str_pad(rand(0, 999999), 6, '0', STR_PAD_LEFT);
+            
+            // Set expiration to 5 minutes from now
+            date_default_timezone_set('Asia/Manila');
+            $expires_at = (new DateTime())->add(new DateInterval('PT5M'))->format('Y-m-d H:i:s');
+
+            // Delete any existing unverified OTP for this email
+            $delete_sql = "DELETE FROM tbl_email_verification WHERE email = :email AND is_verified = 0";
+            $stmt = $this->conn->prepare($delete_sql);
+            $stmt->bindParam(':email', $email);
+            $stmt->execute();
+
+            // Insert new OTP
+            $insert_sql = "INSERT INTO tbl_email_verification (email, otp_code, is_verified, expires_at, created_at) 
+                          VALUES (:email, :otp_code, 0, :expires_at, NOW())";
+            
+            $stmt = $this->conn->prepare($insert_sql);
+            $stmt->bindParam(':email', $email);
+            $stmt->bindParam(':otp_code', $otp_code);
+            $stmt->bindParam(':expires_at', $expires_at);
+
+            if ($stmt->execute()) {
+                // Send OTP via email using PHPMailer
+                $emailSent = $this->sendOTPEmail($email, $otp_code, $expires_at);
+                
+                if ($emailSent) {
+                    return json_encode([
+                        'status' => 'success',
+                        'message' => 'OTP sent successfully to your email',
+                        'data' => [
+                            'email' => $email,
+                            'expires_at' => $expires_at
+                        ]
+                    ]);
+                } else {
+                    // If email sending fails, delete the OTP from database
+                    $delete_failed_sql = "DELETE FROM tbl_email_verification WHERE email = :email AND otp_code = :otp_code";
+                    $stmt = $this->conn->prepare($delete_failed_sql);
+                    $stmt->bindParam(':email', $email);
+                    $stmt->bindParam(':otp_code', $otp_code);
+                    $stmt->execute();
+                    
+                    return json_encode([
+                        'status' => 'error',
+                        'message' => 'Failed to send OTP email. Please try again.'
+                    ]);
+                }
+            } else {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Failed to generate OTP'
+                ]);
+            }
+
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        } catch (Exception $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Error: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    private function sendOTPEmail($email, $otp_code, $expires_at) {
+        try {
+            // Include Composer autoloader and email configuration
+            require_once 'vendor/autoload.php';
+            require_once 'email_config.php';
+            
+            // PHPMailer classes are now available
+            
+            // Create PHPMailer instance
+            $mail = new PHPMailer(true);
+            
+            // SMTP Configuration
+            $mail->isSMTP();
+            $mail->Host = EmailConfig::SMTP_HOST;
+            $mail->SMTPAuth = true;
+            $mail->Username = EmailConfig::SMTP_USERNAME;
+            $mail->Password = EmailConfig::SMTP_PASSWORD;
+            $mail->SMTPSecure = EmailConfig::SMTP_SECURE;
+            $mail->Port = EmailConfig::SMTP_PORT;
+            
+            // Sender and recipient
+            $mail->setFrom(EmailConfig::FROM_EMAIL, EmailConfig::FROM_NAME);
+            $mail->addAddress($email);
+            
+            // Email content
+            $mail->isHTML(true);
+            $mail->Subject = 'CITE ProTrak - Email Verification Code';
+            $mail->Body = EmailConfig::getOTPEmailTemplate($otp_code, $expires_at);
+            
+            // Send email
+            return $mail->send();
+            
+        } catch (Exception $e) {
+            error_log('Email sending failed: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    public function validateOTP($json) {
+        $json = json_decode($json, true);
+        
+        try {
+            // Validate required fields
+            if (empty($json['email']) || empty($json['otp_code'])) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Email and OTP code are required'
+                ]);
+            }
+
+            $email = $json['email'];
+            $otp_code = $json['otp_code'];
+
+            // Check if OTP exists and is not expired
+            date_default_timezone_set('Asia/Manila');
+            $check_sql = "SELECT verification_id, otp_code, is_verified, expires_at 
+                         FROM tbl_email_verification 
+                         WHERE email = :email 
+                         AND is_verified = 0 
+                         AND expires_at > NOW()
+                         ORDER BY created_at DESC 
+                         LIMIT 1";
+            
+            $stmt = $this->conn->prepare($check_sql);
+            $stmt->bindParam(':email', $email);
+            $stmt->execute();
+
+            if ($stmt->rowCount() === 0) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Invalid or expired OTP'
+                ]);
+            }
+
+            $verification = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            // Verify OTP code
+            if ($verification['otp_code'] !== $otp_code) {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Invalid OTP code'
+                ]);
+            }
+
+            // Update verification status to verified
+            $update_sql = "UPDATE tbl_email_verification 
+                          SET is_verified = 1 
+                          WHERE verification_id = :verification_id";
+            
+            $stmt = $this->conn->prepare($update_sql);
+            $stmt->bindParam(':verification_id', $verification['verification_id']);
+
+            if ($stmt->execute()) {
+                return json_encode([
+                    'status' => 'success',
+                    'message' => 'Email verified successfully',
+                    'data' => [
+                        'email' => $email,
+                        'verified' => true
+                    ]
+                ]);
+            } else {
+                return json_encode([
+                    'status' => 'error',
+                    'message' => 'Failed to verify email'
+                ]);
+            }
+
+        } catch (PDOException $e) {
+            return json_encode([
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
 }
 
 // Handle the request
@@ -343,8 +674,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     switch ($operation) {
         case "login":
             echo $login->login($json);
-            break;      
-
+            break;
+        
+        case "signup":
+            echo $login->insertSignUp($json);
+            break;
+        
+        case "sendOTP":
+            echo $login->sendOTP($json);
+            break;
+        
+        case "validateOTP":
+            echo $login->validateOTP($json);
+            break;
 
         default:
             echo json_encode(['status' => 'error', 'message' => 'Invalid operation']);

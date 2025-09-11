@@ -1635,9 +1635,18 @@ class Teacher {
                              THEN CONCAT(' ', u.`users_suffix`) 
                              ELSE '' 
                         END
-                    ) as full_name
+                    ) as full_name,
+                    COALESCE(current_phase.phase_name, 'Not Started') as current_phase_name
                 FROM `tbl_project_members` pm
                 JOIN `tbl_users` u ON pm.`project_users_id` = u.`users_id`
+                LEFT JOIN (
+                    SELECT 
+                        pp.project_main_id,
+                        pp.phase_name,
+                        ROW_NUMBER() OVER (PARTITION BY pp.project_main_id ORDER BY pp.phase_order ASC) as rn
+                    FROM `tbl_project_phases` pp
+                    WHERE pp.status IN ('in_progress', 'pending', 'active')
+                ) current_phase ON pm.project_main_id = current_phase.project_main_id AND current_phase.rn = 1
                 WHERE pm.`project_main_id` = :projectMainId
                 AND pm.`is_active` IN (0,1)
             ");

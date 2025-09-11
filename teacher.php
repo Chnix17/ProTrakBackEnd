@@ -31,7 +31,13 @@ class Teacher {
                         ps.project_status_status_id,
                         sm.status_master_name,
                         ps.project_status_created_at as status_created_at,
-                        (SELECT COUNT(*) FROM tbl_project_members WHERE project_main_id = pm.project_main_id) as member_count
+                        (SELECT COUNT(*) FROM tbl_project_members WHERE project_main_id = pm.project_main_id) as member_count,
+                        latest_phase.phase_main_id,
+                        latest_phase.phase_main_name,
+                        latest_phase.phase_main_description,
+                        latest_phase.phase_start_date,
+                        latest_phase.phase_end_date,
+                        latest_phase.phase_created_at as phase_created_at
                     FROM tbl_project_main pm
                     LEFT JOIN tbl_users u ON pm.project_created_by_user_id = u.users_id
                     LEFT JOIN (
@@ -45,6 +51,26 @@ class Teacher {
                         AND ps1.project_status_created_at = ps2.max_created_at
                     ) ps ON pm.project_main_id = ps.project_status_project_main_id
                     LEFT JOIN tbl_status_master sm ON ps.project_status_status_id = sm.status_master_id
+                    LEFT JOIN (
+                        SELECT 
+                            pp.phase_project_main_id,
+                            phm.phase_main_id,
+                            phm.phase_main_name,
+                            phm.phase_main_description,
+                            phm.phase_start_date,
+                            phm.phase_end_date,
+                            phm.phase_created_at
+                        FROM tbl_phase_project pp
+                        INNER JOIN tbl_phase_main phm ON pp.phase_project_phase_id = phm.phase_main_id
+                        INNER JOIN (
+                            SELECT 
+                                phase_project_main_id, 
+                                MAX(phase_project_created_at) as max_phase_created_at
+                            FROM tbl_phase_project
+                            GROUP BY phase_project_main_id
+                        ) latest_pp ON pp.phase_project_main_id = latest_pp.phase_project_main_id 
+                        AND pp.phase_project_created_at = latest_pp.max_phase_created_at
+                    ) latest_phase ON pm.project_main_id = latest_phase.phase_project_main_id
                     WHERE pm.project_main_master_id = :masterId";
             
             $stmt = $this->conn->prepare($sql);
@@ -64,7 +90,13 @@ class Teacher {
                     'member_count' => (int)$row['member_count'],
                     'status_id' => $row['project_status_status_id'],
                     'status_name' => $row['status_master_name'],
-                    'status_created_at' => $row['status_created_at']
+                    'status_created_at' => $row['status_created_at'],
+                    'phase_id' => $row['phase_main_id'],
+                    'phase_name' => $row['phase_main_name'],
+                    'phase_description' => $row['phase_main_description'],
+                    'phase_start_date' => $row['phase_start_date'],
+                    'phase_end_date' => $row['phase_end_date'],
+                    'phase_created_at' => $row['phase_created_at']
                 ];
             }
             
@@ -96,6 +128,23 @@ class Teacher {
                 return json_encode(['status' => 'error', 'message' => 'Missing required fields: project_title, project_code, project_teacher_id, project_school_year_id']);
             }
 
+            // Check if project name already exists in the same school year
+            $checkSql = "SELECT COUNT(*) as count FROM `tbl_project_master` 
+                        WHERE `project_title` = :title AND `project_school_year_id` = :school_year_id";
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->execute([
+                ':title' => $title,
+                ':school_year_id' => $schoolYearId
+            ]);
+            $result = $checkStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($result['count'] > 0) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'A project with this name already exists in this school year. Please use a different project name.'
+                ]);
+            }
+
             $sql = "INSERT INTO `tbl_project_master` 
                     (`project_title`, `project_description`, `project_code`, `project_teacher_id`, `project_is_active`, `project_school_year_id`)
                     VALUES (:title, :description, :code, :teacher_id, :is_active, :school_year_id)";
@@ -124,6 +173,151 @@ class Teacher {
         }
     }
 
+    // Update project master record (title and description)
+    public function updateProjectMaster($data) {
+        try {
+            // Extract and validate required fields
+            $projectMasterId = (int)($data['project_master_id'] ?? 0);
+            $title = trim((string)($data['project_title'] ?? $data['title'] ?? ''));
+            $description = (string)($data['project_description'] ?? $data['description'] ?? '');
+
+            if ($projectMasterId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'project_master_id is required and must be greater than 0']);
+            }
+
+            if ($title === '') {
+                return json_encode(['status' => 'error', 'message' => 'project_title is required and cannot be empty']);
+            }
+
+            // Check if the project master exists
+            $checkSql = "SELECT project_master_id, project_school_year_id FROM `tbl_project_master` WHERE `project_master_id` = :project_master_id";
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->execute([':project_master_id' => $projectMasterId]);
+            $existingProject = $checkStmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$existingProject) {
+                return json_encode(['status' => 'error', 'message' => 'Project master not found']);
+            }
+
+            // Check if another project with the same title exists in the same school year (excluding current project)
+            $duplicateCheckSql = "SELECT COUNT(*) as count FROM `tbl_project_master` 
+                                 WHERE `project_title` = :title 
+                                 AND `project_school_year_id` = :school_year_id 
+                                 AND `project_master_id` != :project_master_id";
+            $duplicateStmt = $this->conn->prepare($duplicateCheckSql);
+            $duplicateStmt->execute([
+                ':title' => $title,
+                ':school_year_id' => $existingProject['project_school_year_id'],
+                ':project_master_id' => $projectMasterId
+            ]);
+            $duplicateResult = $duplicateStmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($duplicateResult['count'] > 0) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'A project with this title already exists in this school year. Please use a different project title.'
+                ]);
+            }
+
+            // Update the project master
+            $sql = "UPDATE `tbl_project_master` 
+                    SET `project_title` = :title, `project_description` = :description 
+                    WHERE `project_master_id` = :project_master_id";
+
+            $stmt = $this->conn->prepare($sql);
+            $success = $stmt->execute([
+                ':title' => $title,
+                ':description' => $description,
+                ':project_master_id' => $projectMasterId
+            ]);
+
+            if ($success) {
+                return json_encode([
+                    'status' => 'success',
+                    'message' => 'Project master updated successfully',
+                    'project_master_id' => $projectMasterId,
+                    'updated_fields' => [
+                        'project_title' => $title,
+                        'project_description' => $description
+                    ]
+                ]);
+            }
+
+            return json_encode(['status' => 'error', 'message' => 'Failed to update project master']);
+
+        } catch (PDOException $e) {
+            return json_encode(['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()]);
+        }
+    }
+
+    // Archive or restore project master (toggle project_is_active based on archive parameter)
+    public function updateArchive($data) {
+        try {
+            // Extract and validate required fields
+            $projectMasterId = (int)($data['project_master_id'] ?? 0);
+            $archive = $data['archive'] ?? null;
+
+            if ($projectMasterId <= 0) {
+                return json_encode(['status' => 'error', 'message' => 'project_master_id is required and must be greater than 0']);
+            }
+
+            if ($archive === null) {
+                return json_encode(['status' => 'error', 'message' => 'archive parameter is required (true to archive, false to restore)']);
+            }
+
+            // Convert archive parameter to boolean
+            $isArchive = filter_var($archive, FILTER_VALIDATE_BOOLEAN);
+
+            // Check if the project master exists
+            $checkSql = "SELECT project_master_id, project_title, project_is_active FROM `tbl_project_master` WHERE `project_master_id` = :project_master_id";
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->execute([':project_master_id' => $projectMasterId]);
+            $existingProject = $checkStmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$existingProject) {
+                return json_encode(['status' => 'error', 'message' => 'Project master not found']);
+            }
+
+            // Determine the new active status (archive = true means set active to 0, archive = false means set active to 1)
+            $newActiveStatus = $isArchive ? 0 : 1;
+
+            // Check if project is already in the desired state
+            if ($existingProject['project_is_active'] == $newActiveStatus) {
+                $statusMessage = $isArchive ? 'Project is already archived' : 'Project is already active';
+                return json_encode(['status' => 'error', 'message' => $statusMessage]);
+            }
+
+            // Update the project master active status
+            $sql = "UPDATE `tbl_project_master` 
+                    SET `project_is_active` = :is_active 
+                    WHERE `project_master_id` = :project_master_id";
+
+            $stmt = $this->conn->prepare($sql);
+            $success = $stmt->execute([
+                ':is_active' => $newActiveStatus,
+                ':project_master_id' => $projectMasterId
+            ]);
+
+            if ($success) {
+                $actionMessage = $isArchive ? 'Project archived successfully' : 'Project restored successfully';
+                return json_encode([
+                    'status' => 'success',
+                    'message' => $actionMessage,
+                    'project_master_id' => $projectMasterId,
+                    'project_title' => $existingProject['project_title'],
+                    'project_is_active' => $newActiveStatus,
+                    'archived' => $isArchive
+                ]);
+            }
+
+            $failMessage = $isArchive ? 'Failed to archive project' : 'Failed to restore project';
+            return json_encode(['status' => 'error', 'message' => $failMessage]);
+
+        } catch (PDOException $e) {
+            return json_encode(['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()]);
+        }
+    }
+
     // Fetch projects for a given school year id and teacher id
     public function fetchProjectMasterBySchool_year_id($schoolYearId, $teacherId) {
         try {
@@ -139,7 +333,7 @@ class Teacher {
                            sy.`school_year_name`, sy.`school_year_semester_id`
                     FROM `tbl_project_master` pm
                     INNER JOIN `tbl_school_year` sy ON pm.`project_school_year_id` = sy.`school_year_id`
-                    WHERE pm.`project_school_year_id` = :sid AND pm.`project_teacher_id` = :tid";
+                    WHERE pm.`project_school_year_id` = :sid AND pm.`project_teacher_id` = :tid ";
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([
                 ':sid' => $schoolYearId,
@@ -747,6 +941,43 @@ class Teacher {
         }
     }
 
+    // Update project completion status (complete/fail)
+    public function updateCompleteStatus($data) {
+        try {
+            // Validate required fields
+            if (!isset($data['project_status_project_main_id']) || !isset($data['is_completed'])) {
+                throw new Exception('Missing required fields');
+            }
+
+            $projectId = $data['project_status_project_main_id'];
+            $statusId = $data['is_completed'] ? 6 : 7; // 6 = Completed, 7 = Failed
+            $userId = $data['user_id'] ?? 0; // Default to 0 if not provided
+
+            // Insert new status record
+            $sql = "INSERT INTO tbl_project_status 
+                    (project_status_project_main_id, project_status_status_id, project_status_updated_by) 
+                    VALUES (?, ?, ?)";
+            
+            $stmt = $this->conn->prepare($sql);
+            $success = $stmt->execute([$projectId, $statusId, $userId]);
+
+            if ($success) {
+                return [
+                    'status' => 'success',
+                    'message' => 'Project status updated successfully',
+                    'new_status_id' => $statusId
+                ];
+            } else {
+                throw new Exception('Failed to update project status');
+            }
+        } catch (Exception $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Error updating project status: ' . $e->getMessage()
+            ];
+        }
+    }
+
     // Count project masters by teacher with additional filtering options
     public function countProjectMastersByTeacherWithFilters($teacherId, $schoolYearId = null, $isActive = null) {
         try {
@@ -918,6 +1149,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         case 'saveProjectMaster':
             echo $teacher->saveProjectMaster($payload);
             break;
+        case 'updateProjectMaster':
+            echo $teacher->updateProjectMaster($payload);
+            break;
+        case 'updateArchive':
+            echo $teacher->updateArchive($payload);
+            break;
         case 'fetchProjectMasterBySchool_year_id':
             $sid = $payload['school_year_id'] ?? $payload['project_school_year_id'] ?? $payload['schoolYearId'] ?? 0;
             $tid = $payload['project_teacher_id'] ?? $payload['teacher_id'] ?? 0;
@@ -938,6 +1175,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
             $result = $teacher->fetchAllProjects($masterId);
+            echo json_encode($result);
+            break;
+        
+        case 'updateCompleteStatus':
+            $result = $teacher->updateCompleteStatus($payload);
             echo json_encode($result);
             break;
         case 'updateReview':

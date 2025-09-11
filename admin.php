@@ -18,6 +18,57 @@ class Admin {
     }
     
     /**
+     * Fetches all master projects with student counts
+     * 
+     * @return array Array containing all master projects with student counts
+     */
+    public function fetchAllMasterProjects() {
+        try {
+            // Verify database connection
+            if (!$this->conn) {
+                throw new PDOException('Database connection failed');
+            }
+            
+            // Set error mode to exception
+            $this->conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            
+            // Query to get all master projects with student counts
+            $sql = "
+                SELECT 
+                    pm.project_master_id, 
+                    pm.project_title, 
+                    pm.project_description, 
+                    pm.project_code, 
+                    pm.project_teacher_id, 
+                    pm.project_is_active, 
+                    pm.project_school_year_id,
+                    CONCAT(u.users_fname, ' ', u.users_lname) as teacher_name,
+                    (SELECT COUNT(*) 
+                     FROM tbl_student_joined sj 
+                     WHERE sj.student_project_master_id = pm.project_master_id) as student_count
+                FROM tbl_project_master pm
+                LEFT JOIN tbl_users u ON pm.project_teacher_id = u.users_id
+                ORDER BY pm.project_title ASC";
+                
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute();
+            
+            $projects = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            return [
+                'status' => 'success',
+                'data' => $projects
+            ];
+            
+        } catch (PDOException $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Database error: ' . $e->getMessage()
+            ];
+        }
+    }
+    
+    /**
      * Fetches information about a specific person and the project masters they are associated with
      * 
      * @param int $userId The ID of the user to fetch information for
@@ -114,7 +165,7 @@ class Admin {
             $passwordRaw =          ($data['users_password']    ?? $data['password']     ?? '');
 
             // Basic validation
-            if ($titleId <= 0 || $fname === '' || $lname === '' || $schoolId === '' || $email === '' || $userLevelId <= 0 || $passwordRaw === '') {
+            if ($fname === '' || $lname === '' || $schoolId === '' || $email === '' || $userLevelId <= 0 || $passwordRaw === '') {
                 return json_encode([
                     'status' => 'error',
                     'message' => 'Missing required fields.'
@@ -485,6 +536,22 @@ class Admin {
                 }
             }
             
+            // Check if school year name already exists with the same semester ID
+            $checkSql = "SELECT COUNT(*) FROM `tbl_school_year` 
+                        WHERE `school_year_name` = :name AND `school_year_semester_id` = :semester_id";
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->execute([
+                ':name' => $data['school_year_name'],
+                ':semester_id' => $data['school_year_semester_id']
+            ]);
+            
+            if ($checkStmt->fetchColumn() > 0) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'School year name already exists for this semester'
+                ]);
+            }
+            
             // Prepare the SQL query
             $sql = "INSERT INTO `tbl_school_year` 
                     (`school_year_start_date`, `school_year_end_date`, `school_year_admin_id`, 
@@ -517,11 +584,102 @@ class Admin {
             error_log("Error inserting school year: " . $e->getMessage());
             return json_encode([
                 'status' => 'error', 
-                'message' => 'Database error: ' . $e->getMessage()
+                'message' => 'Database error occurred'
+            ]);
+        } catch (Exception $e) {
+            error_log("General error inserting school year: " . $e->getMessage());
+            return json_encode([
+                'status' => 'error', 
+                'message' => 'An error occurred while adding school year'
             ]);
         }
     }
-
+    
+    /**
+     * Updates an existing school year record
+     * 
+     * @param array $data Array containing school year data to update
+     * @return string JSON response with status and message
+     */
+    public function updateSchoolYear($data) {
+        try {
+            // Validate required fields
+            $requiredFields = [
+                'school_year_id',
+                'school_year_start_date', 
+                'school_year_end_date', 
+                'school_year_admin_id', 
+                'school_year_semester_id', 
+                'school_year_name'
+            ];
+            
+            foreach ($requiredFields as $field) {
+                if (!isset($data[$field]) || empty($data[$field])) {
+                    return json_encode([
+                        'status' => 'error', 
+                        'message' => "Missing required field: $field"
+                    ]);
+                }
+            }
+            
+            // Validate that the school year ID exists
+            $checkSql = "SELECT COUNT(*) FROM `tbl_school_year` WHERE `school_year_id` = :school_year_id";
+            $checkStmt = $this->conn->prepare($checkSql);
+            $checkStmt->execute([':school_year_id' => $data['school_year_id']]);
+            
+            if ($checkStmt->fetchColumn() == 0) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'School year not found'
+                ]);
+            }
+            
+            // Prepare the SQL update query
+            $sql = "UPDATE `tbl_school_year` SET 
+                        `school_year_start_date` = :start_date,
+                        `school_year_end_date` = :end_date,
+                        `school_year_admin_id` = :admin_id,
+                        `school_year_semester_id` = :semester_id,
+                        `school_year_name` = :name
+                    WHERE `school_year_id` = :school_year_id";
+            
+            $stmt = $this->conn->prepare($sql);
+            $result = $stmt->execute([
+                ':start_date' => $data['school_year_start_date'],
+                ':end_date' => $data['school_year_end_date'],
+                ':admin_id' => $data['school_year_admin_id'],
+                ':semester_id' => $data['school_year_semester_id'],
+                ':name' => $data['school_year_name'],
+                ':school_year_id' => $data['school_year_id']
+            ]);
+            
+            if ($result) {
+                return json_encode([
+                    'status' => 'success', 
+                    'message' => 'School year updated successfully'
+                ]);
+            } else {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'Failed to update school year'
+                ]);
+            }
+            
+        } catch (PDOException $e) {
+            error_log('Database error in updateSchoolYear: ' . $e->getMessage());
+            return json_encode([
+                'status' => 'error', 
+                'message' => 'Database error occurred'
+            ]);
+        } catch (Exception $e) {
+            error_log('General error in updateSchoolYear: ' . $e->getMessage());
+            return json_encode([
+                'status' => 'error', 
+                'message' => 'An error occurred while updating school year'
+            ]);
+        }
+    }
+    
     public function fetchSchoolYears() {
         try {
             $sql = "SELECT 
@@ -797,6 +955,262 @@ class Admin {
             ]);
         }
     }
+
+    /**
+     * Updates user profile with limited editable fields
+     * Only allows editing: users_title_id, users_fname, users_mname, users_lname, users_suffix, users_school_id, users_email
+     * 
+     * @param array $userData Array containing user ID and profile data to update
+     * @return string JSON response with status and message
+     */
+    public function updateProfile($userData) {
+        try {
+            // Extract user ID and profile data
+            $userId = isset($userData['userId']) ? (int)$userData['userId'] : 0;
+            $data = isset($userData['json']) ? $userData['json'] : $userData;
+            
+            // Debug logging
+            error_log('updateProfile - Received userData: ' . print_r($userData, true));
+            
+            if ($userId <= 0) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'User ID is required'
+                ]);
+            }
+
+            // Check if user exists
+            $checkStmt = $this->conn->prepare("SELECT users_id FROM tbl_users WHERE users_id = :userId");
+            $checkStmt->execute([':userId' => $userId]);
+            
+            if (!$checkStmt->fetch()) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'User not found'
+                ]);
+            }
+
+            // Extract only the allowed profile fields
+            $titleId = isset($data['users_title_id']) ? (int)$data['users_title_id'] : null;
+            $fname = isset($data['users_fname']) ? trim((string)$data['users_fname']) : null;
+            $mname = isset($data['users_mname']) ? trim((string)$data['users_mname']) : null;
+            $lname = isset($data['users_lname']) ? trim((string)$data['users_lname']) : null;
+            $suffix = isset($data['users_suffix']) ? trim((string)$data['users_suffix']) : null;
+            $schoolId = isset($data['users_school_id']) ? trim((string)$data['users_school_id']) : null;
+            $email = isset($data['users_email']) ? trim((string)$data['users_email']) : null;
+
+            // Build dynamic SQL based on provided fields
+            $updateFields = [];
+            $params = [':userId' => $userId];
+
+            if ($titleId !== null) {
+                $updateFields[] = "users_title_id = :titleId";
+                $params[':titleId'] = $titleId;
+            }
+
+            if ($fname !== null && $fname !== '') {
+                $updateFields[] = "users_fname = :fname";
+                $params[':fname'] = $fname;
+            }
+
+            if ($mname !== null) {
+                $updateFields[] = "users_mname = :mname";
+                $params[':mname'] = $mname;
+            }
+
+            if ($lname !== null && $lname !== '') {
+                $updateFields[] = "users_lname = :lname";
+                $params[':lname'] = $lname;
+            }
+
+            if ($suffix !== null) {
+                $updateFields[] = "users_suffix = :suffix";
+                $params[':suffix'] = $suffix;
+            }
+
+            if ($schoolId !== null && $schoolId !== '') {
+                // Check if school ID is unique (excluding current user)
+                $stmt = $this->conn->prepare("SELECT COUNT(*) AS cnt FROM tbl_users WHERE users_school_id = :schoolId AND users_id != :userId");
+                $stmt->execute([':schoolId' => $schoolId, ':userId' => $userId]);
+                if ((int)$stmt->fetch(PDO::FETCH_OBJ)->cnt > 0) {
+                    return json_encode([
+                        'status' => 'error', 
+                        'message' => 'School ID already exists for another user'
+                    ]);
+                }
+                $updateFields[] = "users_school_id = :schoolId";
+                $params[':schoolId'] = $schoolId;
+            }
+
+            if ($email !== null && $email !== '') {
+                // Validate email format
+                if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                    return json_encode([
+                        'status' => 'error', 
+                        'message' => 'Invalid email format'
+                    ]);
+                }
+
+                // Check if email is unique (excluding current user)
+                $stmt = $this->conn->prepare("SELECT COUNT(*) AS cnt FROM tbl_users WHERE users_email = :email AND users_id != :userId");
+                $stmt->execute([':email' => $email, ':userId' => $userId]);
+                if ((int)$stmt->fetch(PDO::FETCH_OBJ)->cnt > 0) {
+                    return json_encode([
+                        'status' => 'error', 
+                        'message' => 'Email address already exists for another user'
+                    ]);
+                }
+                $updateFields[] = "users_email = :email";
+                $params[':email'] = $email;
+            }
+
+            // If no fields to update
+            if (empty($updateFields)) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'No valid fields provided for update'
+                ]);
+            }
+
+            // Build and execute the update query
+            $sql = "UPDATE tbl_users SET " . implode(', ', $updateFields) . " WHERE users_id = :userId";
+            $stmt = $this->conn->prepare($sql);
+
+            if ($stmt->execute($params)) {
+                return json_encode([
+                    'status' => 'success', 
+                    'message' => 'Profile updated successfully'
+                ]);
+            } else {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'Failed to update profile'
+                ]);
+            }
+
+        } catch (PDOException $e) {
+            error_log("Database error in updateProfile: " . $e->getMessage());
+            return json_encode([
+                'status' => 'error', 
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    /**
+     * Updates user password with current password verification
+     * 
+     * @param array $userData Array containing user ID, current password, and new password
+     * @return string JSON response with status and message
+     */
+    public function updatePassword($userData) {
+        try {
+            // Extract user ID and password data
+            $userId = isset($userData['userId']) ? (int)$userData['userId'] : 0;
+            $data = isset($userData['json']) ? $userData['json'] : $userData;
+            
+            // Debug logging
+            error_log('updatePassword - Received userData: ' . print_r($userData, true));
+            
+            if ($userId <= 0) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'User ID is required'
+                ]);
+            }
+
+            // Extract password fields
+            $currentPassword = isset($data['currentPassword']) ? trim((string)$data['currentPassword']) : '';
+            $newPassword = isset($data['newPassword']) ? trim((string)$data['newPassword']) : '';
+            $confirmPassword = isset($data['confirmPassword']) ? trim((string)$data['confirmPassword']) : '';
+
+            // Basic validation
+            if ($currentPassword === '' || $newPassword === '' || $confirmPassword === '') {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'All password fields are required'
+                ]);
+            }
+
+            // Check if new password matches confirmation
+            if ($newPassword !== $confirmPassword) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'New password and confirmation do not match'
+                ]);
+            }
+
+            // Check if current password is same as new password
+            if ($currentPassword === $newPassword) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'New password must be different from current password'
+                ]);
+            }
+
+            // Validate new password strength
+            if (strlen($newPassword) < 8) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'New password must be at least 8 characters long'
+                ]);
+            }
+
+            if (!preg_match('/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/', $newPassword)) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'New password must contain at least one uppercase letter, one lowercase letter, and one number'
+                ]);
+            }
+
+            // Get current user data to verify current password
+            $stmt = $this->conn->prepare("SELECT users_password FROM tbl_users WHERE users_id = :userId");
+            $stmt->execute([':userId' => $userId]);
+            $user = $stmt->fetch(PDO::FETCH_OBJ);
+            
+            if (!$user) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'User not found'
+                ]);
+            }
+
+            // Verify current password
+            if (!password_verify($currentPassword, $user->users_password)) {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'Current password is incorrect'
+                ]);
+            }
+
+            // Hash the new password
+            $hashedNewPassword = password_hash($newPassword, PASSWORD_BCRYPT);
+
+            // Update the password
+            $updateStmt = $this->conn->prepare("UPDATE tbl_users SET users_password = :newPassword WHERE users_id = :userId");
+            $updateStmt->bindParam(':newPassword', $hashedNewPassword, PDO::PARAM_STR);
+            $updateStmt->bindParam(':userId', $userId, PDO::PARAM_INT);
+
+            if ($updateStmt->execute()) {
+                return json_encode([
+                    'status' => 'success', 
+                    'message' => 'Password updated successfully'
+                ]);
+            } else {
+                return json_encode([
+                    'status' => 'error', 
+                    'message' => 'Failed to update password'
+                ]);
+            }
+
+        } catch (PDOException $e) {
+            error_log("Database error in updatePassword: " . $e->getMessage());
+            return json_encode([
+                'status' => 'error', 
+                'message' => 'Database error: ' . $e->getMessage()
+            ]);
+        }
+    }
 }
 
 // Handle the request
@@ -827,6 +1241,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $admin = new Admin();
 
     switch ($operation) {
+        case 'fetchAllMasterProjects':
+            $result = $admin->fetchAllMasterProjects();
+            echo json_encode($result);
+            break;
         case "fetchInactiveUsers":
             echo $admin->fetchInactiveUsers();
             break;
@@ -883,6 +1301,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         case "insertSchoolYear":
             echo $admin->insertSchoolYear($payload);
             break;
+        case "updateSchoolYear":
+            echo $admin->updateSchoolYear($payload);
+            break;
         case "fetchSchoolYears":
             echo $admin->fetchSchoolYears();
             break;
@@ -902,6 +1323,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             break;
         case "getSystemStats":
             echo $admin->getSystemStats();
+            break;
+        case "updateProfile":
+            // Handle updateProfile operation
+            if (isset($input['userId']) && is_array($input['json'])) {
+                $result = $admin->updateProfile(array_merge(
+                    ['userId' => $input['userId']],
+                    ['json' => $input['json']]
+                ));
+                echo $result;
+            } else if (isset($payload['userId'])) {
+                // If not using the nested structure
+                echo $admin->updateProfile($payload);
+            } else {
+                echo json_encode(['status' => 'error', 'message' => 'User ID is required for updateProfile']);
+            }
+            break;
+        case "updatePassword":
+            // Handle updatePassword operation
+            if (isset($input['userId']) && is_array($input['json'])) {
+                $result = $admin->updatePassword(array_merge(
+                    ['userId' => $input['userId']],
+                    ['json' => $input['json']]
+                ));
+                echo $result;
+            } else if (isset($payload['userId'])) {
+                // If not using the nested structure
+                echo $admin->updatePassword($payload);
+            } else {
+                echo json_encode(['status' => 'error', 'message' => 'User ID is required for updatePassword']);
+            }
             break;
         case "fetchJoined":
             $userId = $payload['userId'] ?? 0;
